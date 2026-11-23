@@ -120,6 +120,27 @@ export const ServerProviderSlashCommand = Schema.Struct({
 });
 export type ServerProviderSlashCommand = typeof ServerProviderSlashCommand.Type;
 
+/** An HSL sweep across a keyword's characters, `from` at its first and `to` at its last. */
+export const ServerProviderPromptKeywordSweep = Schema.Struct({
+  from: Schema.Number,
+  to: Schema.Number,
+});
+export type ServerProviderPromptKeywordSweep = typeof ServerProviderPromptKeywordSweep.Type;
+
+/**
+ * A standalone prompt word the provider acts on, such as a word that adds hidden instructions to
+ * the turn. Composers and sent messages paint it with its gradient.
+ */
+export const ServerProviderPromptKeyword = Schema.Struct({
+  word: TrimmedNonEmptyString,
+  /** Hue in degrees; `to` may pass 360 to wrap around. */
+  hue: ServerProviderPromptKeywordSweep,
+  /** Lightness in percent; absent keeps 62%. */
+  lightness: Schema.optional(ServerProviderPromptKeywordSweep),
+  description: Schema.optional(TrimmedNonEmptyString),
+});
+export type ServerProviderPromptKeyword = typeof ServerProviderPromptKeyword.Type;
+
 export const ServerProviderSkill = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
@@ -287,6 +308,8 @@ export const ServerProvider = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** Absent when the provider acts on no prompt keywords. */
+  promptKeywords: Schema.optionalKey(Schema.Array(ServerProviderPromptKeyword)),
   workspaceSnapshots: Schema.optionalKey(Schema.Array(ServerProviderWorkspaceSnapshot)),
   /**
    * Set when the server rescanned a workspace after a session start and its skills or commands

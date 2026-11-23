@@ -36,6 +36,9 @@ clients read declared capabilities, never provider names.
   Pass native approval and question option IDs through unchanged, and ensure every request can be
   declined.
 - **Hide plan mode unless it produces proposed-plan cards.**
+- **Declare prompt keywords as data.** A provider that acts on standalone prompt words (omp's
+  magic keywords) lists them in `ServerProvider.promptKeywords` with their gradient; clients paint
+  them with `@t3tools/shared/promptKeywords` and never hard-code a provider's words.
 - **Reject conversation rollback before touching files** when the provider cannot roll back its
   conversation (see [checkpoints](./01_architecture.md#turn-completion-and-checkpoints)).
 

@@ -9,19 +9,16 @@ import { spawnAndCollect } from "@t3tools/provider-core/server/snapshotProbe";
 
 import { ompModelRoleOverrides, type OmpSettings } from "../settings.ts";
 
-const ROLE_COMMAND_TIMEOUT_MS = 10_000;
+const CONFIG_COMMAND_TIMEOUT_MS = 10_000;
 const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-export class OmpModelRolesError extends Schema.TaggedError<OmpModelRolesError>()(
-  "OmpModelRolesError",
-  {
-    detail: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
+export class OmpConfigError extends Schema.TaggedError<OmpConfigError>()("OmpConfigError", {
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {
   override get message(): string {
-    return `omp model roles: ${this.detail}`;
+    return `omp config: ${this.detail}`;
   }
 }
 
@@ -34,7 +31,8 @@ function readRoleRecord(value: unknown): Record<string, string> {
   return roles;
 }
 
-// `omp config` owns config.yml's format, so roles go through it rather than a YAML rewrite here.
+// `omp config` owns config.yml's format and layering, so settings go through it rather than a
+// YAML reader or rewrite here.
 const runOmpConfig = Effect.fn("runOmpConfig")(function* (
   settings: Pick<OmpSettings, "binaryPath">,
   environment: NodeJS.ProcessEnv,
@@ -54,13 +52,13 @@ const runOmpConfig = Effect.fn("runOmpConfig")(function* (
     }),
   ).pipe(
     Effect.timeoutOrElse({
-      duration: ROLE_COMMAND_TIMEOUT_MS,
-      orElse: () => Effect.fail(new OmpModelRolesError({ detail: "omp config timed out" })),
+      duration: CONFIG_COMMAND_TIMEOUT_MS,
+      orElse: () => Effect.fail(new OmpConfigError({ detail: "timed out" })),
     }),
   );
   if (result.code !== 0) {
-    return yield* new OmpModelRolesError({
-      detail: `omp config ${args[0]} exited with code ${result.code}`,
+    return yield* new OmpConfigError({
+      detail: `${args[0]} exited with code ${result.code}`,
     });
   }
   return result.stdout;
@@ -75,6 +73,38 @@ export const readOmpModelRoles = Effect.fn("readOmpModelRoles")(function* (
   const stdout = yield* runOmpConfig(settings, environment, cwd, ["get", "modelRoles", "--json"]);
   const parsed = Option.getOrUndefined(decodeJson(stdout.trim()));
   return readRoleRecord(Predicate.isObject(parsed) ? parsed["value"] : undefined);
+});
+
+/** Expands `omp config list --json` (`{ "a.b": { value } }`) into config.yml's nested layout. */
+function nestConfigList(list: unknown): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
+  if (!Predicate.isObject(list)) return config;
+  for (const [path, entry] of Object.entries(list)) {
+    // Redacted credentials carry no `value`.
+    if (!Predicate.isObject(entry) || !("value" in entry)) continue;
+    const segments = path.split(".");
+    const leaf = segments.pop();
+    if (leaf === undefined) continue;
+    let parent = config;
+    for (const segment of segments) {
+      const child = parent[segment];
+      const next: Record<string, unknown> = Predicate.isObject(child) ? child : {};
+      parent[segment] = next;
+      parent = next;
+    }
+    parent[leaf] = entry["value"];
+  }
+  return config;
+}
+
+/** omp's resolved settings (`omp config list --json`), nested as config.yml stores them. */
+export const readOmpConfig = Effect.fn("readOmpConfig")(function* (
+  settings: Pick<OmpSettings, "binaryPath">,
+  environment: NodeJS.ProcessEnv,
+  cwd?: string,
+) {
+  const stdout = yield* runOmpConfig(settings, environment, cwd, ["list", "--json"]);
+  return nestConfigList(Option.getOrUndefined(decodeJson(stdout.trim())));
 });
 
 const sameRoles = (

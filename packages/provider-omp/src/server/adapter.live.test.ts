@@ -377,6 +377,42 @@ describe.skipIf(!LIVE)("omp adapter (live)", () => {
   );
 
   it.live(
+    "shows omp's todo tool as the thread's task list",
+    () =>
+      Effect.gen(function* () {
+        const { providerThread, runTurn } = yield* openLive("full-access");
+        const events = yield* runTurn(
+          providerThread,
+          "Use your todo tool to start a list with exactly two tasks, `Read a.txt` and `Report its content`, then mark `Read a.txt` done with the todo tool, then reply DONE. Do not do anything else.",
+        );
+        const lists = events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "todo_list"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.isAbove(lists.length, 0);
+        // Each todo call replaces the same list.
+        assert.strictEqual(new Set(lists.map((list) => list.id)).size, 1);
+        const steps = lists.at(-1)!.steps;
+        assert.strictEqual(steps.length, 2);
+        assert.include(steps[0]!.text, "Read a.txt");
+        assert.strictEqual(steps[0]!.status, "completed");
+        // Later calls replace the list; the first one still had open work.
+        assert.isTrue(lists[0]!.steps.some((step) => step.status !== "completed"));
+        assert.isFalse(
+          events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.toolName === "todo" &&
+              event.turnItem.status === "completed",
+          ),
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerLive)),
+    240_000,
+  );
+
+  it.live(
     "stops a running command and keeps the thread usable",
     () =>
       Effect.gen(function* () {

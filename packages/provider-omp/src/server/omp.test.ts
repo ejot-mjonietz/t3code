@@ -1,6 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
 
-import { normalizeOmpFrame, ompApprovalPrompt, ompAskQuestions } from "./adapter.ts";
+import {
+  normalizeOmpFrame,
+  ompApprovalPrompt,
+  ompAskQuestions,
+  ompTodoPlanSteps,
+} from "./adapter.ts";
 import { parseOmpAvailableCommands, parseOmpCompactCommand } from "./commands.ts";
 import { buildOmpRpcLaunch, ompModelRolesOverlay, resolveOmpLaunchArgs } from "./launch.ts";
 import { ompHostToolResult } from "./mcpHostTools.ts";
@@ -212,17 +217,18 @@ describe("omp RPC frames", () => {
     assert.isUndefined(ompApprovalPrompt("Pick a branch", ["main", "dev"]));
   });
 
-  it("turns ask dialogs into questions that accept free text", () => {
+  it("turns ask dialogs into questions that accept free text and keep omp's labels", () => {
     assert.deepStrictEqual(
       ompAskQuestions([
         {
           id: "color",
           question: "Which color?",
           header: "Color",
-          options: [{ label: "Red" }, { label: "Blue", description: "Calm" }],
+          options: [{ label: " Red " }, { label: "Blue", description: "Calm" }, { label: "  " }],
           multi: true,
+          recommended: 1,
         },
-        { id: "blank", question: "  " },
+        { id: "size", question: "  " },
       ]),
       [
         {
@@ -230,12 +236,66 @@ describe("omp RPC frames", () => {
           header: "Color",
           question: "Which color?",
           options: [
-            { label: "Red", description: "Red", value: "Red" },
-            { label: "Blue", description: "Calm", value: "Blue" },
+            { label: "Red", description: "Red", value: " Red " },
+            { label: "Blue", description: "Calm", value: "Blue", selected: true },
           ],
           multiSelect: true,
           allowCustomAnswer: true,
         },
+        {
+          id: "size",
+          header: "Question 2",
+          question: "Question 2",
+          options: [],
+          allowCustomAnswer: true,
+        },
+      ],
+    );
+    // omp needs an answer to every question, so one T3 cannot key fails the whole dialog.
+    assert.isUndefined(ompAskQuestions([{ id: "a", question: "A?" }, { question: "No id" }]));
+    assert.isUndefined(
+      ompAskQuestions([
+        { id: "a", question: "A?" },
+        { id: "a", question: "Again?" },
+      ]),
+    );
+    assert.isUndefined(ompAskQuestions([{ id: " a", question: "A?" }]));
+    assert.isUndefined(ompAskQuestions([]));
+  });
+
+  it("maps todo phases onto plan steps", () => {
+    assert.deepStrictEqual(
+      ompTodoPlanSteps([
+        {
+          name: "Build",
+          tasks: [
+            { content: "Parse", status: "completed" },
+            { content: "Emit", status: "in_progress" },
+            { content: "Cache", status: "abandoned" },
+          ],
+        },
+        { name: "Ship", tasks: [{ content: "Release", status: "pending" }] },
+      ]),
+      [
+        { id: "1:Parse", text: "Build: Parse", status: "completed" },
+        { id: "1:Emit", text: "Build: Emit", status: "running" },
+        { id: "2:Release", text: "Ship: Release", status: "pending" },
+      ],
+    );
+    // A single phase needs no prefix; repeated content still gets distinct ids.
+    assert.deepStrictEqual(
+      ompTodoPlanSteps([
+        {
+          name: "Todo",
+          tasks: [
+            { content: "Check", status: "completed" },
+            { content: "Check", status: "pending" },
+          ],
+        },
+      ]),
+      [
+        { id: "1:Check", text: "Check", status: "completed" },
+        { id: "1:Check#2", text: "Check", status: "pending" },
       ],
     );
   });

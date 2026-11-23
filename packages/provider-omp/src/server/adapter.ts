@@ -22,7 +22,9 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2PlanStep,
   type OrchestrationV2UserInputQuestion,
+  type PlanId,
   type ProviderApprovalDecision,
   type ProviderInstanceId,
   type ProviderThreadId,
@@ -101,6 +103,7 @@ import {
   openOmpT3McpHostTools,
   type OmpT3McpHostTools,
 } from "./mcpHostTools.ts";
+import { parseOmpHtmlForm, type OmpHtmlForm } from "./htmlForm.ts";
 import { isOmpThinkingLevel, parseOmpModelSelector } from "./modelCapabilities.ts";
 import { readOmpModelRoles } from "./roles.ts";
 import { ompModelRoleOverrides } from "../settings.ts";
@@ -182,8 +185,8 @@ const OmpProviderCapabilitiesV2 = {
     approvalsCanOriginateFromSubagents: false,
   },
   planning: {
-    emitsPlanUpdated: false,
-    emitsTodoList: false,
+    emitsPlanUpdated: true,
+    emitsTodoList: true,
     emitsProposedPlan: false,
     supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
@@ -410,6 +413,8 @@ interface OmpItemTarget {
   readonly commandOutputBytes: Map<string, number>;
   readonly endedToolCalls: Set<string>;
   interrupted: boolean;
+  /** The list omp's `todo` tool keeps here; each successful call replaces its steps in place. */
+  todoList: { readonly planId: PlanId; readonly startedAt: DateTime.Utc } | null;
 }
 
 interface ActiveOmpTurn extends OmpItemTarget {
@@ -489,7 +494,7 @@ interface OmpApprovalChoices {
 
 interface PendingOmpPrompt {
   readonly nativeRequestId: string;
-  readonly method: "select" | "confirm" | "input" | "editor" | "ask";
+  readonly method: "select" | "confirm" | "input" | "editor" | "ask" | "form";
   readonly questionId: string;
   readonly approvalKey: string;
   readonly expiresAt: number | null;
@@ -499,6 +504,7 @@ interface PendingOmpPrompt {
   readonly turnItem: OrchestrationV2TurnItem;
   readonly approval: OmpApprovalChoices | undefined;
   readonly askQuestions: ReadonlyArray<OrchestrationV2UserInputQuestion> | undefined;
+  readonly form: OmpHtmlForm | undefined;
 }
 
 const OMP_FILE_CHANGE_TOOLS = new Set(["edit", "write", "ast_edit", "notebook"]);
@@ -1630,6 +1636,53 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         };
       };
 
+      // omp's todo tool reports its whole list; one item and plan per target show the latest one.
+      const emitTodoList = Effect.fnUntraced(function* (
+        target: OmpItemTarget,
+        steps: ReadonlyArray<OrchestrationV2PlanStep>,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        const todoList = target.todoList ?? {
+          planId: yield* idAllocator.allocate.plan({
+            threadId: target.threadId,
+            ...(target.runId === null ? {} : { runId: target.runId }),
+            driver: OMP_PROVIDER,
+          }),
+          startedAt: emittedAt,
+        };
+        target.todoList = todoList;
+        const { planId, startedAt } = todoList;
+        const nativeItemId = `todo:${target.streamKey}`;
+        const base = baseItemFields(target, nativeItemId, startedAt, emittedAt);
+        yield* emitItemNode(target, nativeItemId, "todo_list", "completed", startedAt, emittedAt);
+        yield* emit({
+          type: "plan.updated",
+          driver: OMP_PROVIDER,
+          plan: {
+            id: planId,
+            threadId: target.threadId,
+            runId: target.runId,
+            nodeId: base.nodeId,
+            kind: "todo_list",
+            status: steps.every((step) => step.status === "completed") ? "completed" : "active",
+            steps,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: OMP_PROVIDER,
+          turnItem: {
+            ...base,
+            status: "completed",
+            title: null,
+            completedAt: emittedAt,
+            type: "todo_list",
+            planId,
+            steps,
+          },
+        });
+      });
+
       const emitToolItem = Effect.fnUntraced(function* (
         target: OmpItemTarget,
         event: OmpRpcRecord,
@@ -1673,6 +1726,15 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               : "failed"
             : "completed"
           : "running";
+        // A successful todo call shows as the target's todo list; a failed one keeps its tool row.
+        if (toolName === "todo") {
+          const phases = completed && !isError ? recordField(details, "phases") : undefined;
+          if (Array.isArray(phases)) {
+            yield* emitTodoList(target, ompTodoPlanSteps(phases));
+            return;
+          }
+          if (!completed) return;
+        }
         const itemId = target.nativeItemId(toolCallId);
         const parentItemId =
           parentToolCallId === undefined ? undefined : target.nativeItemId(parentToolCallId);
@@ -1957,6 +2019,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                 commandOutputBytes: new Map(),
                 endedToolCalls: new Set(),
                 interrupted: false,
+                todoList: null,
               },
               appThread: makeSubagentChildThread({
                 parentThread,
@@ -2201,6 +2264,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       const cancelPrompt = Effect.fn("OmpAdapter.cancelPrompt")(function* (
         pending: PendingOmpPrompt,
         resolvedAt: DateTime.Utc,
+        expired = false,
       ) {
         if (pending.expirationFiber !== null) yield* Fiber.interrupt(pending.expirationFiber);
         yield* connection
@@ -2208,6 +2272,10 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             type: "extension_ui_response",
             id: pending.nativeRequestId,
             cancelled: true,
+            // omp answers a timed-out ask or form with its own defaults.
+            ...(expired && (pending.method === "ask" || pending.method === "form")
+              ? { timedOut: true }
+              : {}),
           })
           .pipe(Effect.ignore);
         pending.runtimeRequest = {
@@ -2335,7 +2403,8 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           method !== "confirm" &&
           method !== "input" &&
           method !== "editor" &&
-          method !== "ask"
+          method !== "ask" &&
+          method !== "form"
         ) {
           yield* Effect.logDebug("Ignoring omp extension UI update.", { method });
           return;
@@ -2358,7 +2427,13 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         const isApproval = method === "confirm" || approval !== undefined;
         const askQuestions =
           method === "ask" ? ompAskQuestions(recordField(event, "questions")) : undefined;
-        if (method === "ask" && (askQuestions === undefined || askQuestions.length === 0)) {
+        const form =
+          method === "form" ? parseOmpHtmlForm(recordString(event, "html") ?? "") : undefined;
+        // omp needs every question answered, so a dialog T3 cannot show is declined at once.
+        if (
+          (method === "ask" && askQuestions === undefined) ||
+          (method === "form" && form === undefined)
+        ) {
           yield* connection.send({
             type: "extension_ui_response",
             id: nativeRequestId,
@@ -2366,6 +2441,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           });
           return;
         }
+        const structuredQuestions = askQuestions ?? form?.questions ?? [];
         const state = threadState;
         const turn = state?.activeTurn ?? null;
         const createdAt = yield* DateTime.now;
@@ -2461,12 +2537,15 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                 }
               : {
                   ...itemBase,
-                  title: method === "ask" ? (askQuestions?.[0]?.header ?? "Question") : title,
+                  title:
+                    method === "ask" || method === "form"
+                      ? (structuredQuestions[0]?.header ?? "Question")
+                      : title,
                   type: "user_input_request",
                   requestId,
                   questions:
-                    method === "ask"
-                      ? (askQuestions ?? [])
+                    method === "ask" || method === "form"
+                      ? structuredQuestions
                       : [ompQuestion(nativeRequestId, method, title, event)],
                 };
         const pending: PendingOmpPrompt = {
@@ -2481,6 +2560,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           turnItem,
           approval: approval?.choices,
           askQuestions,
+          form,
         };
         pendingPrompts.set(String(requestId), pending);
         yield* emit({
@@ -2801,7 +2881,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         // Model hooks can show dialogs before turn ownership; keep requests session-scoped and buffer output.
         const interactiveUiRequest =
           event["type"] === "extension_ui_request" &&
-          ["select", "confirm", "input", "editor", "ask", "cancel"].includes(
+          ["select", "confirm", "input", "editor", "ask", "form", "cancel"].includes(
             String(event["method"]),
           );
         if (
@@ -3102,6 +3182,44 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             );
             return;
           }
+          case "retry_fallback_applied": {
+            const from = recordString(event, "from");
+            const to = recordString(event, "to");
+            if (turn === null || from === undefined || to === undefined) return;
+            const role = recordString(event, "role")?.trim();
+            const reason = recordString(event, "reason")?.trim();
+            const message = `omp switched from ${from} to ${to}${role ? ` (${role})` : ""}`;
+            yield* emitSystemNotice(
+              turn,
+              `retry-fallback:${turn.providerTurn.id}:${turn.nextItemOrdinal}`,
+              (reason ? `${message}: ${reason}` : message).slice(0, 2_000),
+              "warning",
+            );
+            return;
+          }
+          case "ttsr_triggered": {
+            const rules = event["rules"];
+            if (turn === null || !Array.isArray(rules)) return;
+            // omp names each injected rule; a rule without a name is known by its file.
+            const names = [
+              ...new Set(
+                rules.flatMap((rule) => {
+                  const name =
+                    recordString(rule, "name")?.trim() || recordString(rule, "path")?.trim();
+                  return name ? [name] : [];
+                }),
+              ),
+            ];
+            if (names.length === 0) return;
+            const label = names.length === 1 ? "rule" : "rules";
+            yield* emitSystemNotice(
+              turn,
+              `ttsr:${turn.providerTurn.id}:${turn.nextItemOrdinal}`,
+              `omp applied ${label}: ${names.join(", ")}`.slice(0, 2_000),
+              "info",
+            );
+            return;
+          }
           case "prompt_result": {
             // Reports a prompt that failed or ran locally without starting the agent.
             if (turn === null || recordString(event, "id") !== turn.turnStartPromptId) return;
@@ -3299,7 +3417,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             const pending = pendingPrompts.get(requestId);
             if (pending === undefined || pending !== event["pending"]) return;
             pendingPrompts.delete(requestId);
-            yield* cancelPrompt(pending, yield* DateTime.now);
+            yield* cancelPrompt(pending, yield* DateTime.now, true);
             return;
           }
           case "t3.flush_extension_errors": {
@@ -4055,6 +4173,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               commandOutputBytes: new Map(),
               endedToolCalls: new Set(),
               interrupted: false,
+              todoList: null,
               nativeAborted: false,
               sawAgentActivity: false,
               adoptedWake: false,
@@ -4347,7 +4466,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               DateTime.toEpochMillis(answeredAt) >= pending.expiresAt
             ) {
               pendingPrompts.delete(String(requestInput.requestId));
-              yield* cancelPrompt(pending, answeredAt);
+              yield* cancelPrompt(pending, answeredAt, true);
               return yield* protocolError(
                 `omp extension request ${requestInput.requestId} has expired`,
               );
@@ -4930,37 +5049,49 @@ function ompQuestion(
   };
 }
 
-/** omp `ask` questions; omp always accepts free text beside the listed options. */
-export function ompAskQuestions(input: unknown): ReadonlyArray<OrchestrationV2UserInputQuestion> {
-  if (!Array.isArray(input)) return [];
-  return input.flatMap((entry, index): Array<OrchestrationV2UserInputQuestion> => {
+/**
+ * omp `ask` questions; omp always accepts free text beside the listed options. Undefined when a
+ * question cannot be shown, since omp needs an answer to every question, in order.
+ */
+export function ompAskQuestions(
+  input: unknown,
+): ReadonlyArray<OrchestrationV2UserInputQuestion> | undefined {
+  if (!Array.isArray(input) || input.length === 0) return undefined;
+  const ids = new Set<string>();
+  const questions: Array<OrchestrationV2UserInputQuestion> = [];
+  for (const [index, entry] of input.entries()) {
+    // Answers come back keyed by T3's trimmed question id; omp matches its own id exactly.
     const id = recordString(entry, "id");
-    const question = recordString(entry, "question")?.trim();
-    if (id === undefined || question === undefined || question.length === 0) return [];
+    if (id === undefined || id.length === 0 || id.trim() !== id || ids.has(id)) return undefined;
+    ids.add(id);
+    const header = recordString(entry, "header")?.trim() || `Question ${index + 1}`;
+    const recommended = recordNumber(entry, "recommended");
     const options = recordField(entry, "options");
-    return [
-      {
-        id,
-        header: recordString(entry, "header")?.trim() || `Question ${index + 1}`,
-        question,
-        options: (Array.isArray(options) ? options : []).flatMap((option) => {
-          const label = recordString(option, "label")?.trim();
-          if (label === undefined || label.length === 0) return [];
-          const preview = recordString(option, "preview");
-          return [
-            {
-              label,
-              description: recordString(option, "description")?.trim() || label,
-              value: label,
-              ...(preview === undefined ? {} : { preview }),
-            },
-          ];
-        }),
-        ...(recordField(entry, "multi") === true ? { multiSelect: true } : {}),
-        allowCustomAnswer: true,
-      },
-    ];
-  });
+    questions.push({
+      id,
+      header,
+      question: recordString(entry, "question")?.trim() || header,
+      options: (Array.isArray(options) ? options : []).flatMap((option, optionIndex) => {
+        const value = recordString(option, "label");
+        const label = value?.trim();
+        if (value === undefined || !label) return [];
+        const preview = recordString(option, "preview");
+        return [
+          {
+            label,
+            description: recordString(option, "description")?.trim() || label,
+            // omp accepts only the exact label it sent.
+            value,
+            ...(preview === undefined ? {} : { preview }),
+            ...(optionIndex === recommended ? { selected: true } : {}),
+          },
+        ];
+      }),
+      ...(recordField(entry, "multi") === true ? { multiSelect: true } : {}),
+      allowCustomAnswer: true,
+    });
+  }
+  return questions;
 }
 
 function ompAskAnswer(
@@ -4971,9 +5102,9 @@ function ompAskAnswer(
     (value): value is string => typeof value === "string" && value.trim().length > 0,
   );
   if (values.length === 0) return undefined;
-  const labels = new Set(question.options.map((option) => option.label));
-  const selectedOptions = values.filter((value) => labels.has(value));
-  const custom = values.filter((value) => !labels.has(value)).join("\n");
+  const optionValues = new Set(question.options.map((option) => option.value ?? option.label));
+  const selectedOptions = values.filter((value) => optionValues.has(value));
+  const custom = values.filter((value) => !optionValues.has(value)).join("\n");
   return {
     id: question.id,
     selectedOptions,
@@ -4999,12 +5130,16 @@ function ompUiResponse(
     if (decision === "decline") return { confirmed: false };
     return { cancelled: true };
   }
+  if (pending.form !== undefined) {
+    return answers === undefined ? { cancelled: true } : { data: pending.form.toData(answers) };
+  }
   if (pending.method === "ask") {
     const questions = pending.askQuestions ?? [];
     const replies = questions.flatMap((question) => {
       const reply = ompAskAnswer(question, answers?.[question.id]);
       return reply === undefined ? [] : [reply];
     });
+    // omp rejects a reply that skips any question, so a partial answer cancels the ask.
     return replies.length === questions.length && replies.length > 0
       ? { answers: replies }
       : { cancelled: true };
@@ -5013,6 +5148,32 @@ function ompUiResponse(
   // RPC distinguishes empty dialog values from cancellation (undefined).
   if (typeof answer === "string") return { value: answer };
   return { cancelled: true };
+}
+
+/** omp's todo phases as plan steps; abandoned tasks drop out, and several phases prefix tasks. */
+export function ompTodoPlanSteps(phases: ReadonlyArray<unknown>): Array<OrchestrationV2PlanStep> {
+  const ids = new Set<string>();
+  return phases.flatMap((phase, phaseIndex) => {
+    const phaseName = phases.length > 1 ? recordString(phase, "name")?.trim() : undefined;
+    const tasks = recordField(phase, "tasks");
+    return (Array.isArray(tasks) ? tasks : []).flatMap((task): Array<OrchestrationV2PlanStep> => {
+      const content = recordString(task, "content")?.trim();
+      const nativeStatus = recordString(task, "status");
+      const status =
+        nativeStatus === "in_progress"
+          ? "running"
+          : nativeStatus === "pending" || nativeStatus === "completed"
+            ? nativeStatus
+            : undefined;
+      if (!content || status === undefined) return [];
+      // omp addresses tasks by content, so phase and content keep a step's id across updates.
+      const baseId = `${phaseIndex + 1}:${content}`;
+      let id = baseId;
+      for (let copy = 2; ids.has(id); copy += 1) id = `${baseId}#${copy}`;
+      ids.add(id);
+      return [{ id, text: phaseName ? `${phaseName}: ${content}` : content, status }];
+    });
+  });
 }
 
 export type OmpAdapterV2DriverEnv =

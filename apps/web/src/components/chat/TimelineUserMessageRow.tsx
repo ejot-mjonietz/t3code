@@ -8,9 +8,11 @@ import {
   type EnvironmentId,
   type MessageId,
   type ScheduledTaskId,
+  type ServerProviderPromptKeyword,
   type ServerProviderSkill,
   ThreadId,
 } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
@@ -1283,6 +1285,25 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
 
 const USER_MESSAGE_MARKDOWN: MarkdownExtensions = { userMessage: true, leadingWhitespace: true };
 
+const userMessageMarkdownByKeywords = new Map<string, MarkdownExtensions>();
+
+/**
+ * One extension object per keyword set: provider snapshots rebuild equal keyword arrays, and a new
+ * object would drop every bubble's parse cache.
+ */
+function userMessageMarkdown(
+  keywords: ReadonlyArray<ServerProviderPromptKeyword> | undefined,
+): MarkdownExtensions {
+  if (keywords === undefined || keywords.length === 0) return USER_MESSAGE_MARKDOWN;
+  const key = JSON.stringify(keywords);
+  let extensions = userMessageMarkdownByKeywords.get(key);
+  if (extensions === undefined) {
+    extensions = { ...USER_MESSAGE_MARKDOWN, promptKeywords: keywords };
+    userMessageMarkdownByKeywords.set(key, extensions);
+  }
+  return extensions;
+}
+
 const UserMessageBody = memo(function UserMessageBody(props: {
   text: string;
   renderContextReference?: (reference: ChatMarkdownContextReference) => ReactNode;
@@ -1290,6 +1311,17 @@ const UserMessageBody = memo(function UserMessageBody(props: {
   markdownCwd: string | undefined;
 }) {
   const ctx = use(TimelineRowCtx);
+  // The prompt keywords the thread's provider instance declares glow as the provider reads them.
+  const instanceId = useQuietThreadShell(ctx.threadRef)?.modelSelection.instanceId;
+  const markdown = useAtomValue(
+    serverEnvironment.providersValueAtom(ctx.activeThreadEnvironmentId),
+    (providers) =>
+      userMessageMarkdown(
+        instanceId === undefined
+          ? undefined
+          : providers?.find((provider) => provider.instanceId === instanceId)?.promptKeywords,
+      ),
+  );
   if (props.text.length === 0) {
     return null;
   }
@@ -1302,7 +1334,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
       className="text-message-foreground user-message-markdown"
       lineBreaks
       parseRawHtml={false}
-      extensions={USER_MESSAGE_MARKDOWN}
+      extensions={markdown}
       renderContextReference={props.renderContextReference}
       headingLevelOffset={MESSAGE_HEADING_LEVEL}
     />

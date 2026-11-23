@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildPendingUserInputAnswers,
+  initialPendingUserInputDraft,
   isPendingUserInputOptionSelected,
   resolvePendingUserInputAnswer,
   setPendingUserInputCustomAnswer,
@@ -30,6 +31,83 @@ const nativeChoiceQuestion = {
   allowCustomAnswer: false,
   multiSelect: false,
 } as const;
+
+const multiSelectQuestion = {
+  id: "surfaces",
+  header: "Surfaces",
+  question: "Which surfaces should change?",
+  options: [
+    { label: "Server", description: "Server" },
+    { label: "Web", description: "Web" },
+    { label: "Mobile", value: "native", description: "Mobile" },
+  ],
+  multiSelect: true,
+} as const;
+
+describe("initialPendingUserInputDraft", () => {
+  it("submits the provider's default options as if the user picked them", () => {
+    const single = {
+      ...singleSelectQuestion,
+      options: [
+        { label: "Orchestration-first", description: "Focus on orchestration first" },
+        { label: "Node.js", description: "Reuse TypeScript", selected: true },
+      ],
+    };
+    const multi = {
+      ...multiSelectQuestion,
+      options: multiSelectQuestion.options.map((option) => ({
+        ...option,
+        selected: option.label !== "Web",
+      })),
+    };
+    const drafts = {
+      scope: initialPendingUserInputDraft(single) ?? {},
+      surfaces: initialPendingUserInputDraft(multi) ?? {},
+    };
+
+    expect(drafts).toEqual({
+      scope: { selectedOptionValues: ["Node.js"] },
+      surfaces: { selectedOptionValues: ["Server", "native"] },
+    });
+    expect(isPendingUserInputOptionSelected(single, drafts.scope, "Node.js")).toBe(true);
+    expect(isPendingUserInputOptionSelected(multi, drafts.surfaces, "native")).toBe(true);
+    expect(buildPendingUserInputAnswers([single, multi], drafts)).toEqual({
+      scope: "Node.js",
+      surfaces: ["Server", "native"],
+    });
+    expect(
+      buildPendingUserInputAnswers([multi], {
+        surfaces: togglePendingUserInputOptionSelection(multi, drafts.surfaces, "Web"),
+      }),
+    ).toEqual({ surfaces: ["Server", "native", "Web"] });
+  });
+
+  it("keeps only the first default of a single-select question", () => {
+    const question = {
+      ...singleSelectQuestion,
+      options: singleSelectQuestion.options.map((option) => ({ ...option, selected: true })),
+    };
+    expect(initialPendingUserInputDraft(question)).toEqual({
+      selectedOptionValues: ["Orchestration-first"],
+    });
+  });
+
+  it("starts free text from the suggested answer and suggests nothing otherwise", () => {
+    const textQuestion = { id: "notes", options: [], allowCustomAnswer: true };
+    expect(initialPendingUserInputDraft({ ...textQuestion, initialAnswer: "Draft" })).toEqual({
+      customAnswer: "Draft",
+    });
+    expect(initialPendingUserInputDraft(textQuestion)).toBeUndefined();
+    expect(initialPendingUserInputDraft(singleSelectQuestion)).toBeUndefined();
+    expect(
+      initialPendingUserInputDraft({
+        ...nativeChoiceQuestion,
+        initialAnswer: "Ignored",
+        options: [{ value: "second", label: "Result", selected: true }],
+      }),
+    ).toEqual({ selectedOptionValues: ["second"] });
+  });
+});
 
 describe("resolvePendingUserInputAnswer", () => {
   it("preserves exact editor text, including a deliberately cleared answer", () => {
@@ -166,6 +244,53 @@ describe("setPendingUserInputCustomAnswer", () => {
         result: { selectedOptionValues: ["second"], customAnswer: "stale draft" },
       }),
     ).toEqual({ result: "second" });
+  });
+
+  it("adds custom text to multi-select selections", () => {
+    const server = togglePendingUserInputOptionSelection(multiSelectQuestion, undefined, "Server");
+    const typed = setPendingUserInputCustomAnswer(multiSelectQuestion, server, "Docs site");
+    expect(typed).toEqual({ customAnswer: "Docs site", selectedOptionValues: ["Server"] });
+    expect(isPendingUserInputOptionSelected(multiSelectQuestion, typed, "Server")).toBe(true);
+    expect(resolvePendingUserInputAnswer(multiSelectQuestion, typed)).toEqual([
+      "Server",
+      "Docs site",
+    ]);
+
+    const withMobile = togglePendingUserInputOptionSelection(multiSelectQuestion, typed, "native");
+    expect(resolvePendingUserInputAnswer(multiSelectQuestion, withMobile)).toEqual([
+      "Server",
+      "native",
+      "Docs site",
+    ]);
+    expect(
+      resolvePendingUserInputAnswer(multiSelectQuestion, {
+        ...withMobile,
+        customAnswer: "Server",
+      }),
+    ).toEqual(["Server", "native"]);
+    expect(
+      resolvePendingUserInputAnswer(
+        multiSelectQuestion,
+        setPendingUserInputCustomAnswer(multiSelectQuestion, withMobile, ""),
+      ),
+    ).toEqual(["Server", "native"]);
+    expect(resolvePendingUserInputAnswer(multiSelectQuestion, { customAnswer: "Docs site" })).toBe(
+      "Docs site",
+    );
+  });
+
+  it("replaces a single-select choice with custom text", () => {
+    const typed = setPendingUserInputCustomAnswer(
+      singleSelectQuestion,
+      { selectedOptionValues: ["Node.js"] },
+      "Deno",
+    );
+    expect(typed).toEqual({ customAnswer: "Deno" });
+    expect(isPendingUserInputOptionSelected(singleSelectQuestion, typed, "Node.js")).toBe(false);
+    expect(togglePendingUserInputOptionSelection(singleSelectQuestion, typed, "Node.js")).toEqual({
+      customAnswer: "",
+      selectedOptionValues: ["Node.js"],
+    });
   });
 });
 

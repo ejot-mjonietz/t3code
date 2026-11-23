@@ -4,6 +4,7 @@ import {
   type CustomModelSetting,
   type ServerProvider,
   type ServerProviderModel,
+  type ServerProviderPromptKeyword,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -46,7 +47,8 @@ import {
 import { parseOmpAvailableCommands } from "./commands.ts";
 import { buildOmpRpcLaunch, resolveOmpLaunchArgs } from "./launch.ts";
 import { makeOmpRpcConnection, OmpRpcError, OmpRpcTimeoutError } from "./rpc.ts";
-import { readOmpModelRoles } from "./roles.ts";
+import { ompPromptKeywords } from "./magicKeywords.ts";
+import { readOmpConfig, readOmpModelRoles } from "./roles.ts";
 
 const OMP_DRIVER_KIND = ProviderDriverKind.make("omp");
 
@@ -234,14 +236,18 @@ function snapshot(
   checkedAt: string,
   models: ReadonlyArray<ServerProviderModel>,
   probe: Parameters<typeof buildServerProvider>[0]["probe"],
+  promptKeywords?: ReadonlyArray<ServerProviderPromptKeyword>,
 ): ServerProviderDraft {
-  return buildServerProvider({
+  const draft = buildServerProvider({
     presentation: OMP_PRESENTATION,
     enabled: settings.enabled,
     checkedAt,
     models,
     probe,
   });
+  return promptKeywords === undefined || promptKeywords.length === 0
+    ? draft
+    : { ...draft, promptKeywords };
 }
 
 export const buildInitialOmpProviderSnapshot = Effect.fn(
@@ -358,12 +364,18 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
   }
 
   const timeoutMs = resolveProviderProbeTimeoutMs("omp", MODELS_PROBE_TIMEOUT_MS, environment);
-  const [rolesResult, modelsResult] = yield* Effect.all(
+  const [rolesResult, promptKeywords, modelsResult] = yield* Effect.all(
     [
       readOmpModelRoles(settings, probeEnvironment, cwd).pipe(
         Effect.timeoutOption(timeoutMs),
         Effect.map(Option.getOrElse((): Readonly<Record<string, string>> => ({}))),
         Effect.orElseSucceed((): Readonly<Record<string, string>> => ({})),
+      ),
+      // An unreadable config leaves omp on its defaults, which enable every keyword.
+      readOmpConfig(settings, probeEnvironment, cwd).pipe(
+        Effect.timeoutOption(timeoutMs),
+        Effect.map((config) => ompPromptKeywords(Option.getOrUndefined(config))),
+        Effect.orElseSucceed(() => ompPromptKeywords(undefined)),
       ),
       runOmpCommand(settings, probeEnvironment, ["models", "--json"], cwd).pipe(
         Effect.timeoutOption(timeoutMs),
@@ -387,14 +399,20 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
         errorTag: modelsResult.failure._tag,
       });
     }
-    return snapshot(settings, checkedAt, ompModelsFromSettings(settings.customModels, roles), {
-      installed: true,
-      version,
-      status: "ready",
-      auth: { status: "unknown" },
-      message:
-        "omp is available, but T3 Code could not list its models. The live session will retry.",
-    });
+    return snapshot(
+      settings,
+      checkedAt,
+      ompModelsFromSettings(settings.customModels, roles),
+      {
+        installed: true,
+        version,
+        status: "ready",
+        auth: { status: "unknown" },
+        message:
+          "omp is available, but T3 Code could not list its models. The live session will retry.",
+      },
+      promptKeywords,
+    );
   }
   const authenticated = discovered.length > 0;
   return snapshot(
@@ -413,6 +431,7 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
               "omp has no usable models. Run `omp` in a terminal and use /login, or configure an API key.",
           }),
     },
+    promptKeywords,
   );
 });
 

@@ -5,7 +5,10 @@ import { memo, use, useEffect, useEffectEvent, useRef, useState } from "react";
 import { BackgroundThreadContext } from "./backgroundThread";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { type PendingUserInput } from "../../session-logic";
-import type { PendingUserInputDraftAnswer } from "@t3tools/client-runtime/state/pending-user-input";
+import {
+  isPendingUserInputOptionSelected,
+  type PendingUserInputDraftAnswer,
+} from "@t3tools/client-runtime/state/pending-user-input";
 import { derivePendingUserInputProgress } from "../../pendingUserInput";
 import { CheckboxMark } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -100,10 +103,15 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const activeQuestion = progress.activeQuestion;
   const customAnswerActive = progress.customAnswer.trim().length > 0;
   // Read before later hooks to preserve the question's compiler cache.
-  const draftSelectedOptions = activeQuestion?.options.map(
-    (option) =>
-      !customAnswerActive && progress.selectedOptionValues.includes(option.value ?? option.label),
-  );
+  const draftSelectedOptions = activeQuestion
+    ? activeQuestion.options.map((option) =>
+        isPendingUserInputOptionSelected(
+          activeQuestion,
+          progress.activeDraft,
+          option.value ?? option.label,
+        ),
+      )
+    : undefined;
   const isCollapsed = collapsedQuestionId !== null && collapsedQuestionId === activeQuestion?.id;
 
   if (

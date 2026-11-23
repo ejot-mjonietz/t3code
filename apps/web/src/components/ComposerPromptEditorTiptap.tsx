@@ -28,16 +28,18 @@ import {
   type Transaction,
 } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
-import type { NodeType, ResolvedPos } from "@tiptap/pm/model";
+import type { Node as ProseMirrorNode, NodeType, ResolvedPos } from "@tiptap/pm/model";
 import type {
   AssistantCitation,
   ComposerContextClipboardFragment,
+  ServerProviderPromptKeyword,
   ServerProviderSkill,
 } from "@t3tools/contracts";
 import {
   serializeAssistantCitation,
   withAssistantCitationComment,
 } from "@t3tools/shared/assistantCitations";
+import { findPromptKeywords, promptKeywordGradient } from "@t3tools/shared/promptKeywords";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
   encodeComposerContextClipboardHtml,
@@ -185,6 +187,8 @@ export interface ComposerPromptEditorProps {
     | ((fragment: ComposerContextClipboardFragment) => ReadonlyMap<string, string>)
     | undefined;
   skills: ReadonlyArray<ServerProviderSkill>;
+  /** The provider's magic words to paint; absent or empty paints none. */
+  promptKeywords?: ReadonlyArray<ServerProviderPromptKeyword> | undefined;
   disabled: boolean;
   placeholder: string;
   /** Rendered after the placeholder text, such as a key hint. */
@@ -796,6 +800,75 @@ function chipSelectionDecorations({ doc, selection }: EditorState): DecorationSe
   return DecorationSet.create(doc, decorations);
 }
 
+const NO_PROMPT_KEYWORDS: ReadonlyArray<ServerProviderPromptKeyword> = [];
+
+interface PromptKeywordState {
+  readonly keywords: ReadonlyArray<ServerProviderPromptKeyword>;
+  readonly decorations: DecorationSet;
+}
+
+/** A transaction carrying this meta replaces the keyword list. */
+const PromptKeywordPluginKey = new PluginKey<PromptKeywordState>("composer-prompt-keywords");
+
+/** Paints the provider's prompt keywords with their gradients; decorations only, never content. */
+const ComposerPromptKeywordExtension = Extension.create({
+  name: "composer-prompt-keywords",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<PromptKeywordState>({
+        key: PromptKeywordPluginKey,
+        state: {
+          init: () => ({ keywords: NO_PROMPT_KEYWORDS, decorations: DecorationSet.empty }),
+          apply: (tr, previous, _, state) => {
+            const replaced = tr.getMeta(PromptKeywordPluginKey) as
+              | ReadonlyArray<ServerProviderPromptKeyword>
+              | undefined;
+            if (replaced === undefined && !tr.docChanged) return previous;
+            const keywords = replaced ?? previous.keywords;
+            return { keywords, decorations: promptKeywordDecorations(state.doc, keywords) };
+          },
+        },
+        props: {
+          decorations: (state) => PromptKeywordPluginKey.getState(state)?.decorations,
+        },
+      }),
+    ];
+  },
+});
+
+/**
+ * Matches run over the serialized prompt, so fences and code spans exclude keywords exactly as in
+ * the sent text; each match maps back onto the document text showing it, never onto a chip.
+ */
+function promptKeywordDecorations(
+  doc: ProseMirrorNode,
+  keywords: ReadonlyArray<ServerProviderPromptKeyword>,
+): DecorationSet {
+  if (keywords.length === 0) return DecorationSet.empty;
+  const map = serializeEditorDoc(doc);
+  const decorations: Decoration[] = [];
+  for (const { start, end, keyword } of findPromptKeywords(map.value, keywords)) {
+    const attrs = {
+      class: "prompt-keyword prompt-keyword-shimmer",
+      style: `--prompt-keyword-gradient: ${promptKeywordGradient(keyword)}`,
+    };
+    for (const run of map.runs) {
+      if (run.mdStart >= end) break;
+      if (run.kind !== "text" || run.nodeName === "codeBlock") continue;
+      // Shown Markdown source can split one word across text runs with no delimiter between.
+      const textStart = run.mdStart + run.openLen;
+      const from = Math.max(start, textStart);
+      const to = Math.min(end, textStart + run.docLen);
+      if (from < to) {
+        decorations.push(
+          Decoration.inline(run.pmPos + from - textStart, run.pmPos + to - textStart, attrs),
+        );
+      }
+    }
+  }
+  return DecorationSet.create(doc, decorations);
+}
+
 type TiptapEditor = NonNullable<ReturnType<typeof useEditor>>;
 
 const SILENT_SELECTION_META = "composerSilentSelection";
@@ -892,6 +965,7 @@ function createComposerExtensions(richText: boolean) {
     ComposerCitationExtension,
     ComposerContextReferenceExtension,
     ComposerChipSelectionExtension,
+    ComposerPromptKeywordExtension,
     ...(richText
       ? [
           ComposerMarkdownSourceExtension,
@@ -986,6 +1060,7 @@ function ComposerPromptEditorTiptapInner(
     buildContextClipboardFragment,
     importContextFragment,
     skills,
+    promptKeywords = NO_PROMPT_KEYWORDS,
     disabled,
     placeholder,
     ariaLabel,
@@ -1765,6 +1840,14 @@ function ComposerPromptEditorTiptapInner(
     );
     if (replacements.length > 0) replaceSkillChips(editor, replacements);
   }, [editor, literalText, modelKeys, skills]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hands a loaded or switched provider's keyword list to the decoration plugin before paint
+  useLayoutEffect(() => {
+    if (!editor || PromptKeywordPluginKey.getState(editor.state)?.keywords === promptKeywords) {
+      return;
+    }
+    editor.view.dispatch(editor.state.tr.setMeta(PromptKeywordPluginKey, promptKeywords));
+  }, [editor, promptKeywords]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the mounted editor's visible text anchored while its DOM width changes
   useLayoutEffect(() => {

@@ -20,6 +20,11 @@ import type { AtomCommandResult } from "./runtime.ts";
 import type { ThreadStructure, ThreadStructureVisibleTurnItem } from "./models.ts";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
+import {
+  initialPendingUserInputDraft,
+  type PendingUserInputDraftAnswer,
+  type PendingUserInputQuestion,
+} from "./pendingUserInput.ts";
 
 export type ApprovalResponder = (
   requestId: RuntimeRequestId,
@@ -104,20 +109,18 @@ export interface PendingThreadRequests {
   readonly userInputs: ReadonlyArray<ThreadPendingUserInput>;
 }
 
-export function seedUserInputDraftAnswers<Draft extends { readonly customAnswer?: string }>(
-  questions: ReadonlyArray<
-    Pick<OrchestrationV2UserInputQuestion, "id" | "allowCustomAnswer" | "initialAnswer">
-  >,
-  drafts: Record<string, Draft>,
-): Record<string, Draft | { customAnswer: string }> {
+/** Starts each untouched question from its suggested answer and default options; edits stay. */
+export function seedUserInputDraftAnswers(
+  questions: ReadonlyArray<PendingUserInputQuestion>,
+  drafts: Record<string, PendingUserInputDraftAnswer>,
+): Record<string, PendingUserInputDraftAnswer> {
   // Entries, not assignment, so an id such as `__proto__` becomes an own draft.
-  const seeds = questions.flatMap((question) =>
-    question.initialAnswer === undefined ||
-    question.allowCustomAnswer === false ||
-    Object.hasOwn(drafts, question.id)
-      ? []
-      : [[question.id, { customAnswer: question.initialAnswer }] as const],
-  );
+  const seeds = questions.flatMap((question) => {
+    const initial = Object.hasOwn(drafts, question.id)
+      ? undefined
+      : initialPendingUserInputDraft(question);
+    return initial === undefined ? [] : [[question.id, initial] as const];
+  });
   return seeds.length === 0 ? drafts : { ...drafts, ...Object.fromEntries(seeds) };
 }
 

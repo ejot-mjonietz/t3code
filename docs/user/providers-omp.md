@@ -66,9 +66,28 @@ Changing the mode restarts the omp session and resumes the same conversation.
 
 ## Questions, Commands and Skills
 
-When omp's `ask` tool asks a question, it appears in the composer with its options and a field for
-your own answer. omp's slash commands and skills appear in the composer menus. Commands that would
-move omp to another session, model, title or folder are left out, because T3 Code manages those.
+When omp's `ask` tool asks you something, its form appears in the composer: each field becomes a
+question with its choices, checkboxes allow several answers, and text fields take your typed
+answer. omp's recommended or default choices start selected, so submitting without changes sends
+them. Where omp offers **Other**, type your own answer. If omp's ask timeout runs out first, omp
+uses its defaults.
+
+omp's slash commands and skills appear in the composer menus. Commands that would move omp to
+another session, model, title or folder are left out, because T3 Code manages those.
+
+## Magic Keywords
+
+omp acts on a few standalone words in a prompt: `ultrathink`, `chillax`, `orchestrate`,
+`workflowz` and `jevify`. Each one adds omp's own instructions to that turn. The composer paints
+them with omp's gradient while you type, and sent messages keep it, so you can see which words omp
+will act on. Words inside code, file names and paths are not keywords. Keywords you turn off in
+omp's settings (`magicKeywords`) are not painted.
+
+## Todo Lists and Notices
+
+omp's `todo` list shows as the thread's task list, phase by phase, and updates as omp works,
+including inside subagent threads. When omp falls back to another model after errors or injects one
+of your rules into the conversation, a notice in the thread says so.
 
 ## T3 Code Tools
 

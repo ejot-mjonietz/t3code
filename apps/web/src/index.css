@@ -2462,6 +2462,41 @@ code {
   filter: saturate(1.2);
 }
 
+/* A provider's prompt keyword, painted with `--prompt-keyword-gradient`: one sweep drawn twice,
+   so the half shown at 200% width can scroll seamlessly. Only the fill turns transparent, so the
+   caret and selected text keep the surrounding foreground. */
+.prompt-keyword {
+  caret-color: currentColor;
+
+  @media (forced-colors: none) {
+    background-image: var(--prompt-keyword-gradient);
+    background-size: 200% 100%;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+.prompt-keyword::selection {
+  -webkit-text-fill-color: currentColor;
+}
+
+/* Scrolls from sweep one (0%) to the identical sweep two (100%), so colors flow right to left like
+   omp's editor shimmer. */
+@keyframes prompt-keyword-shimmer {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: 100% 0;
+  }
+}
+
+.prompt-keyword-shimmer {
+  @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+    animation: prompt-keyword-shimmer 1.8s linear infinite;
+  }
+}
+
 @keyframes preview-loading-progress {
   from {
     transform: scaleX(0.04);

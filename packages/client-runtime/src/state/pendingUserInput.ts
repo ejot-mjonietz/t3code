@@ -1,7 +1,11 @@
 /** The question fields answer handling reads. Web and mobile question types both fit it. */
 export interface PendingUserInputQuestion {
   readonly id: string;
-  readonly options: ReadonlyArray<{ readonly label: string; readonly value?: string | undefined }>;
+  readonly options: ReadonlyArray<{
+    readonly label: string;
+    readonly value?: string | undefined;
+    readonly selected?: boolean | undefined;
+  }>;
   readonly multiSelect?: boolean | undefined;
   readonly allowCustomAnswer?: boolean | undefined;
   readonly initialAnswer?: string | undefined;
@@ -57,6 +61,26 @@ export function normalizeSelectedOptionValues(
   );
 }
 
+/**
+ * The draft an untouched question starts from: the provider's suggested text and default
+ * options (the first for single-select, all for multi-select). Undefined when it suggests none.
+ */
+export function initialPendingUserInputDraft(
+  question: PendingUserInputQuestion,
+): PendingUserInputDraftAnswer | undefined {
+  const customAnswer = question.allowCustomAnswer === false ? undefined : question.initialAnswer;
+  const defaults = normalizeSelectedOptionValues(
+    question,
+    question.options.flatMap((option) => (option.selected ? [option.value ?? option.label] : [])),
+  );
+  const selectedOptionValues = question.multiSelect ? defaults : defaults.slice(0, 1);
+  if (customAnswer === undefined && selectedOptionValues.length === 0) return undefined;
+  return {
+    ...(customAnswer === undefined ? {} : { customAnswer }),
+    ...(selectedOptionValues.length > 0 ? { selectedOptionValues } : {}),
+  };
+}
+
 /** The answer to submit for one question, or null while it is unanswered. */
 export function resolvePendingUserInputAnswer(
   question: PendingUserInputQuestion,
@@ -69,6 +93,15 @@ export function resolvePendingUserInputAnswer(
       : question.initialAnswer !== undefined
         ? (draft?.customAnswer ?? null)
         : normalizeDraftAnswer(draft?.customAnswer);
+  const selectedOptionValues = normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
+  // Multi-select text joins the selections as one more entry; single-select text replaces the choice.
+  if (question.multiSelect && selectedOptionValues.length > 0) {
+    return customAnswer !== null &&
+      customAnswer.length > 0 &&
+      !selectedOptionValues.includes(customAnswer)
+      ? [...selectedOptionValues, customAnswer]
+      : selectedOptionValues;
+  }
   if (customAnswer !== null && customAnswer.length > 0) {
     return customAnswer;
   }
@@ -76,18 +109,12 @@ export function resolvePendingUserInputAnswer(
     return "";
   }
 
-  const selectedOptionValues = normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
+  const attachmentOnlyAnswer =
+    question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null;
   if (question.multiSelect) {
-    return selectedOptionValues.length > 0
-      ? selectedOptionValues
-      : (customAnswer ??
-          (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null));
+    return customAnswer ?? attachmentOnlyAnswer;
   }
-  return (
-    selectedOptionValues[0] ??
-    customAnswer ??
-    (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null)
-  );
+  return selectedOptionValues[0] ?? customAnswer ?? attachmentOnlyAnswer;
 }
 
 export function setPendingUserInputCustomAnswer(
@@ -99,10 +126,12 @@ export function setPendingUserInputCustomAnswer(
     return draft ?? {};
   }
 
+  // Multi-select text sits beside the selections; single-select text replaces the choice.
   const selectedOptionValues =
-    question.initialAnswer !== undefined || customAnswer.trim().length > 0
-      ? undefined
-      : normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
+    question.multiSelect ||
+    (question.initialAnswer === undefined && customAnswer.trim().length === 0)
+      ? normalizeSelectedOptionValues(question, draft?.selectedOptionValues)
+      : undefined;
   return {
     customAnswer,
     ...(selectedOptionValues && selectedOptionValues.length > 0 ? { selectedOptionValues } : {}),
@@ -114,7 +143,11 @@ export function isPendingUserInputOptionSelected(
   draft: PendingUserInputDraftAnswer | undefined,
   optionValue: string,
 ): boolean {
-  if (question.allowCustomAnswer !== false && normalizeDraftAnswer(draft?.customAnswer)) {
+  if (
+    !question.multiSelect &&
+    question.allowCustomAnswer !== false &&
+    normalizeDraftAnswer(draft?.customAnswer)
+  ) {
     return false;
   }
 
@@ -148,7 +181,7 @@ export function togglePendingUserInputOptionSelection(
       : [...selectedOptionValues, resolvedOptionValue];
 
     return {
-      customAnswer: "",
+      ...(draft?.customAnswer === undefined ? {} : { customAnswer: draft.customAnswer }),
       ...(nextSelectedOptionValues.length > 0
         ? { selectedOptionValues: nextSelectedOptionValues }
         : {}),
