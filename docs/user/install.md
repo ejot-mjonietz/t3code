@@ -204,6 +204,7 @@ computer.
 | Kiro                | Install [Kiro CLI](https://kiro.dev/docs/cli/), then run `kiro-cli login`.                                                                                |
 | OpenCode            | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
 | Antigravity         | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
+| Oh My Pi (omp)      | Install [omp](./providers-omp.md#set-up-omp) with `bun install -g @oh-my-pi/pi-coding-agent`, then run `omp` and `/login`.                                |
 | Pi                  | Install [Pi](./providers-pi.md#set-up-pi) with Node.js 22.19 or newer, then run `pi` and `/login`.                                                        |
 | Muse Code           | Install [Muse Code](https://dev.meta.ai/docs/muse-code) on the server, run `muse login`, then enable it in Settings → Providers.                          |
 | fx                  | Install [fx](https://fx.sh) with `curl -fsSL https://fx.sh/setup.sh \| bash`, then run `fx login`.                                                        |
@@ -247,7 +248,7 @@ their original values.
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
 [Antigravity](./providers-antigravity.md), [Kiro](./providers-kiro.md),
-[Pi](./providers-pi.md), [Muse Code](./providers-muse.md), [fx](./providers-fx.md), and
+[Oh My Pi](./providers-omp.md), [Pi](./providers-pi.md), [Muse Code](./providers-muse.md), [fx](./providers-fx.md), and
 [ACP Registry agents](./providers-acp.md).
 
 ### Provider check timeouts
@@ -281,6 +282,7 @@ greater than 2147483647; unset or invalid values keep the defaults.
 | Grok                | `T3CODE_GROK_PROBE_TIMEOUT_MS`         |
 | Kiro                | `T3CODE_KIRO_PROBE_TIMEOUT_MS`         |
 | fx                  | `T3CODE_FX_PROBE_TIMEOUT_MS`           |
+| Oh My Pi (omp)      | `T3CODE_OMP_PROBE_TIMEOUT_MS`          |
 | Pi                  | `T3CODE_PI_PROBE_TIMEOUT_MS`           |
 | Muse Code           | `T3CODE_MUSE_PROBE_TIMEOUT_MS`         |
 | OpenCode            | `T3CODE_OPENCODE_PROBE_TIMEOUT_MS`     |

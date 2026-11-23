@@ -27,7 +27,9 @@ const mergeProviderModels = (
   ];
 };
 
+// omp leads so new threads start on it when it is available.
 const BUILT_IN_DRIVER_ORDER: ReadonlyArray<string> = [
+  "omp",
   "codex",
   "claudeAgent",
   "cursor",

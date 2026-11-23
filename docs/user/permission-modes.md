@@ -65,4 +65,8 @@ approvals for actions that support them.
 Kiro offers only **Supervised** and **Full access**. In **Supervised** Kiro also asks you to
 review a turn's file changes. See [Kiro permissions](./providers-kiro.md#permission-modes).
 
+Oh My Pi enforces the modes with its own approval modes and can still ask in **Full access** for
+restricted folders and provider safety checks. See
+[Oh My Pi permissions](./providers-omp.md#permission-modes).
+
 See the [provider guides](./install.md#providers) for setup and provider-specific limits.

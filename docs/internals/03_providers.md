@@ -18,7 +18,8 @@ clients read declared capabilities, never provider names.
   ACP agent deviates from or lacks part of the spec, let orchestration degrade through capabilities
   rather than special-casing it here. Dedicated ACP flavors (over `packages/provider-acp`) are
   reserved for first-party drivers that need behavior outside the ACP spec; native
-  `ProviderAdapterV2` adapters are only for non-ACP protocols.
+  `ProviderAdapterV2` adapters are only for non-ACP protocols. [omp](../../packages/provider-omp)
+  is the exception: it speaks ACP, but only its RPC mode reports subagents, so it runs on RPC.
 - **Package boundaries.** Providers live in `packages/provider-<name>` (see
   [Pi](../../packages/provider-pi) as reference). Server code imports only
   `@t3tools/provider-core/server/*`, contracts, and shared, reaching host capabilities through

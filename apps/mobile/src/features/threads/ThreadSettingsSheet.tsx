@@ -127,6 +127,7 @@ import { formatProviderUpdateRequiredNotice } from "@t3tools/client-runtime/prov
 import type { MessageResolver } from "../../i18n/messages";
 
 const PRIMARY_PROVIDER_DRIVERS: ReadonlySet<string> = new Set([
+  "omp",
   "claudeAgent",
   "codex",
   "antigravity",
