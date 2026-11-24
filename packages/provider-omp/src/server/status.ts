@@ -5,6 +5,8 @@ import {
   type ServerProvider,
   type ServerProviderModel,
   type ServerProviderPromptKeyword,
+  type ServerProviderSubProvider,
+  type ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -48,6 +50,7 @@ import { parseOmpAvailableCommands } from "./commands.ts";
 import { buildOmpRpcLaunch, resolveOmpLaunchArgs } from "./launch.ts";
 import { makeOmpRpcConnection, OmpRpcError, OmpRpcTimeoutError } from "./rpc.ts";
 import { ompPromptKeywords } from "./magicKeywords.ts";
+import { ompProviderName } from "./providerNames.ts";
 import { readOmpConfig, readOmpModelRoles } from "./roles.ts";
 
 const OMP_DRIVER_KIND = ProviderDriverKind.make("omp");
@@ -153,7 +156,7 @@ export function parseOmpModelList(
     result.push({
       slug,
       name: typeof name === "string" && name.trim() !== "" ? name : slug,
-      subProvider: provider,
+      subProvider: ompProviderName(provider),
       isCustom: false,
       capabilities: ompModelCapabilities(model, defaultThinking),
     });
@@ -231,12 +234,25 @@ export const discoverOmpCommandsForCwd = Effect.fn("discoverOmpCommandsForCwd")(
   },
 );
 
+/** omp's providers, in the order it lists their models; pickers group models under them. */
+function ompSubProviders(
+  models: ReadonlyArray<ServerProviderModel>,
+): ReadonlyArray<ServerProviderSubProvider> {
+  // Role and custom entries carry no provider and stay above the groups.
+  const names = new Set<string>();
+  for (const model of models) {
+    if (model.subProvider !== undefined) names.add(model.subProvider);
+  }
+  return [...names].map((name) => ({ name }));
+}
+
 function snapshot(
   settings: OmpSettings,
   checkedAt: string,
   models: ReadonlyArray<ServerProviderModel>,
   probe: Parameters<typeof buildServerProvider>[0]["probe"],
   promptKeywords?: ReadonlyArray<ServerProviderPromptKeyword>,
+  usageLimits?: ServerProviderUsageLimits,
 ): ServerProviderDraft {
   const draft = buildServerProvider({
     presentation: OMP_PRESENTATION,
@@ -245,9 +261,13 @@ function snapshot(
     models,
     probe,
   });
-  return promptKeywords === undefined || promptKeywords.length === 0
-    ? draft
-    : { ...draft, promptKeywords };
+  const subProviders = ompSubProviders(models);
+  return {
+    ...draft,
+    ...(promptKeywords === undefined || promptKeywords.length === 0 ? {} : { promptKeywords }),
+    ...(subProviders.length === 0 ? {} : { subProviders }),
+    ...(usageLimits === undefined ? {} : { usageLimits }),
+  };
 }
 
 export const buildInitialOmpProviderSnapshot = Effect.fn(
@@ -282,6 +302,12 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
   environment: NodeJS.ProcessEnv = process.env,
   cwd?: string,
   compatibility: ProviderCompatibilityLookup = noCompatibilityPolicy,
+  // Runs beside the model probe once omp is known to work; see makeOmpUsageLimitsProbe.
+  readUsageLimits: Effect.Effect<
+    ServerProviderUsageLimits | undefined,
+    never,
+    ChildProcessSpawner.ChildProcessSpawner
+  > = Effect.undefined,
 ): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = ompModelsFromSettings(
@@ -364,7 +390,7 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
   }
 
   const timeoutMs = resolveProviderProbeTimeoutMs("omp", MODELS_PROBE_TIMEOUT_MS, environment);
-  const [rolesResult, promptKeywords, modelsResult] = yield* Effect.all(
+  const [rolesResult, promptKeywords, modelsResult, usageLimits] = yield* Effect.all(
     [
       readOmpModelRoles(settings, probeEnvironment, cwd).pipe(
         Effect.timeoutOption(timeoutMs),
@@ -381,6 +407,7 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
         Effect.timeoutOption(timeoutMs),
         Effect.result,
       ),
+      readUsageLimits,
     ],
     { concurrency: "unbounded" },
   );
@@ -412,6 +439,7 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
           "omp is available, but T3 Code could not list its models. The live session will retry.",
       },
       promptKeywords,
+      usageLimits,
     );
   }
   const authenticated = discovered.length > 0;
@@ -432,6 +460,7 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
           }),
     },
     promptKeywords,
+    usageLimits,
   );
 });
 

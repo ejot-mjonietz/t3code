@@ -3,6 +3,15 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import type { RuntimeMode } from "@t3tools/contracts";
+import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+
+import {
+  OMP_T3_EXTENSION_FILENAME,
+  OMP_T3_EXTENSION_SOURCE,
+  T3_MCP_BEARER_ENV,
+  T3_MCP_URL_ENV,
+  T3_OMP_INSTRUCTIONS_FILE_ENV,
+} from "./t3ExtensionSource.ts";
 
 const RESERVED_OMP_LAUNCH_ARGUMENTS = new Set([
   "--alias",
@@ -30,7 +39,7 @@ const RESERVED_OMP_LAUNCH_ARGUMENTS = new Set([
   "-v",
 ]);
 
-const OMP_ARGUMENTS_WITH_VALUES = new Set([
+export const OMP_ARGUMENTS_WITH_VALUES: ReadonlySet<string> = new Set([
   "--add-dir",
   "--api-key",
   "--append-system-prompt",
@@ -118,35 +127,6 @@ function ompApprovalMode(runtimeMode: RuntimeMode): string {
   }
 }
 
-const T3_OMP_INSTRUCTIONS_FILE_ENV = "T3_OMP_INSTRUCTIONS_FILE";
-const OMP_T3_EXTENSION_FILENAME = "omp-t3-instructions-extension.ts";
-
-// --append-system-prompt would replace the user's own APPEND_SYSTEM.md, so the instructions
-// arrive through a hook that appends to whatever system prompt omp built. The adapter rewrites
-// the file before each turn, so model and workspace details stay current.
-const OMP_T3_EXTENSION_SOURCE = `\
-import { readFileSync } from "node:fs";
-
-export default function t3CodeInstructions(omp: {
-  on(
-    event: "before_agent_start",
-    handler: (event: { systemPrompt: string[] }) => { systemPrompt: string[] } | undefined,
-  ): void;
-}) {
-  const file = process.env[${JSON.stringify(T3_OMP_INSTRUCTIONS_FILE_ENV)}];
-  if (!file) return;
-  omp.on("before_agent_start", (event) => {
-    let instructions = "";
-    try {
-      instructions = readFileSync(file, "utf8").trim();
-    } catch {
-      return undefined;
-    }
-    return instructions ? { systemPrompt: [...event.systemPrompt, instructions] } : undefined;
-  });
-}
-`;
-
 /** Writes a file other omp launches may be reading through a same-directory rename. */
 const writeFileAtomically = Effect.fn("writeOmpFileAtomically")(function* (
   directory: string,
@@ -169,6 +149,7 @@ const writeFileAtomically = Effect.fn("writeOmpFileAtomically")(function* (
   return dest;
 });
 
+/** The T3 extension: T3 Code's MCP tools and the per-turn instructions the adapter writes. */
 export const materializeOmpT3Extension = (cacheDir: string) =>
   writeFileAtomically(cacheDir, OMP_T3_EXTENSION_FILENAME, OMP_T3_EXTENSION_SOURCE);
 
@@ -204,6 +185,10 @@ export function buildOmpRpcLaunch(input: {
   readonly runtimeMode?: RuntimeMode;
   readonly extensionPath?: string | undefined;
   readonly instructionsFile?: string | undefined;
+  /** The thread's T3 Code MCP endpoint, which the extension registers tools from. */
+  readonly mcpSession?:
+    | Pick<McpProviderSessionConfig, "endpoint" | "authorizationHeader">
+    | undefined;
   readonly modelRolesOverlayPath?: string | undefined;
   /** Text generation and probes: no tools, extensions, skills, rules or context files. */
   readonly bare?: boolean;
@@ -211,6 +196,7 @@ export function buildOmpRpcLaunch(input: {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
 } {
+  const hasExtension = input.extensionPath !== undefined && input.bare !== true;
   const args = [
     "--mode",
     "rpc-ui",
@@ -236,20 +222,30 @@ export function buildOmpRpcLaunch(input: {
           "--no-title",
         ]
       : []),
-    ...(input.extensionPath === undefined || input.bare === true
-      ? []
-      : ["--extension", input.extensionPath]),
+    ...(hasExtension && input.extensionPath !== undefined
+      ? ["--extension", input.extensionPath]
+      : []),
   ];
   const environment = { ...input.environment };
-  // Instructions belong to this T3 session; never inherit the server's or a parent agent's.
+  // Instructions and MCP credentials belong to this T3 session; never inherit the server's or a
+  // parent agent's. The token stays in the environment, never on disk.
   delete environment[T3_OMP_INSTRUCTIONS_FILE_ENV];
+  delete environment[T3_MCP_URL_ENV];
+  delete environment[T3_MCP_BEARER_ENV];
   return {
     args,
     env: {
       ...environment,
-      ...(input.instructionsFile === undefined || input.bare === true
-        ? {}
-        : { [T3_OMP_INSTRUCTIONS_FILE_ENV]: input.instructionsFile }),
+      ...(hasExtension && input.instructionsFile !== undefined
+        ? { [T3_OMP_INSTRUCTIONS_FILE_ENV]: input.instructionsFile }
+        : {}),
+      ...(hasExtension && input.mcpSession !== undefined
+        ? {
+            [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
+            // The extension adds the scheme back.
+            [T3_MCP_BEARER_ENV]: input.mcpSession.authorizationHeader.replace(/^Bearer /, ""),
+          }
+        : {}),
     },
   };
 }

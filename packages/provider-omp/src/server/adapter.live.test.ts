@@ -124,6 +124,7 @@ const openLive = Effect.fnUntraced(function* (
       Effect.void,
     continuation = false,
     turnSelection: ModelSelection = selection(),
+    resume = false,
   ) {
     ordinal += 1;
     const now = yield* DateTime.now;
@@ -151,7 +152,7 @@ const openLive = Effect.fnUntraced(function* (
       lastVisitedAt: null,
       deletedAt: null,
     } satisfies OrchestrationV2AppThread;
-    yield* runtime.startTurn({
+    const turn = {
       appThread,
       threadId,
       runId,
@@ -160,16 +161,25 @@ const openLive = Effect.fnUntraced(function* (
       attemptId: RunAttemptId.make(`run-attempt:${runId}:1`),
       rootNodeId: NodeId.make(`node:${runId}:root`),
       providerThread: thread,
-      message: {
-        messageId: `message:${threadId}:${ordinal}` as never,
-        text,
-        attachments: [],
-        createdBy: continuation ? "agent" : "user",
-        creationSource: continuation ? "provider" : "web",
-      },
       modelSelection: turnSelection,
       runtimePolicy,
-    });
+    };
+    const messageId = `message:${threadId}:${ordinal}` as never;
+    if (resume) {
+      assert.isDefined(runtime.resumeTurn);
+      yield* runtime.resumeTurn!({ ...turn, messageId });
+    } else {
+      yield* runtime.startTurn({
+        ...turn,
+        message: {
+          messageId,
+          text,
+          attachments: [],
+          createdBy: continuation ? "agent" : "user",
+          creationSource: continuation ? "provider" : "web",
+        },
+      });
+    }
     const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
     while (true) {
       const event = yield* Queue.take(events);
@@ -220,6 +230,17 @@ describe.skipIf(!LIVE)("omp adapter (live)", () => {
           (event) => event.type === "provider_turn.updated" && event.providerTurn.tokenUsage,
         );
         assert.isAbove(usage.length, 0);
+        // The settled turn carries what its assistant messages billed.
+        const billed = second.findLast(
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.turnTokenUsage !== undefined,
+        );
+        const turnUsage =
+          billed?.type === "provider_turn.updated" ? billed.providerTurn.turnTokenUsage : undefined;
+        assert.strictEqual(turnUsage?.usageStatus, "complete");
+        assert.isAbove(turnUsage?.inputTokens ?? 0, 0);
+        assert.isAbove(turnUsage?.outputTokens ?? 0, 0);
       }).pipe(Effect.scoped, Effect.provide(layerLive)),
     240_000,
   );
@@ -439,6 +460,42 @@ describe.skipIf(!LIVE)("omp adapter (live)", () => {
         );
         const after = yield* runTurn(providerThread, "Reply with exactly: after stop");
         assert.include(assistantText(after).toLowerCase(), "after stop");
+      }).pipe(Effect.scoped, Effect.provide(layerLive)),
+    240_000,
+  );
+
+  it.live(
+    "continues an interrupted turn with native resume",
+    () =>
+      Effect.gen(function* () {
+        const { runtime, providerThread, runTurn } = yield* openLive("full-access");
+        const stopped = yield* runTurn(
+          providerThread,
+          "Run the shell command `sleep 20` with your bash tool, then reply with exactly: resumed ok",
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "command_execution" &&
+            event.turnItem.status === "running"
+              ? runtime
+                  .interruptTurn({
+                    providerThread,
+                    providerTurnId: event.turnItem.providerTurnId!,
+                  })
+                  .pipe(Effect.forkScoped, Effect.asVoid)
+              : Effect.void,
+        );
+        const stoppedTerminal = stopped.find((event) => event.type === "turn.terminal");
+        assert.strictEqual(
+          stoppedTerminal?.type === "turn.terminal" ? stoppedTerminal.status : null,
+          "interrupted",
+        );
+        const resumed = yield* runTurn(providerThread, "", undefined, false, selection(), true);
+        const terminal = resumed.find((event) => event.type === "turn.terminal");
+        assert.strictEqual(
+          terminal?.type === "turn.terminal" ? terminal.status : null,
+          "completed",
+        );
+        assert.include(assistantText(resumed).toLowerCase(), "resumed ok");
       }).pipe(Effect.scoped, Effect.provide(layerLive)),
     240_000,
   );

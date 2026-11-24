@@ -13,12 +13,13 @@ const CONFIG_COMMAND_TIMEOUT_MS = 10_000;
 const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-export class OmpConfigError extends Schema.TaggedError<OmpConfigError>()("OmpConfigError", {
+export class OmpCommandError extends Schema.TaggedError<OmpCommandError>()("OmpCommandError", {
+  command: Schema.String,
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
-    return `omp config: ${this.detail}`;
+    return `omp ${this.command}: ${this.detail}`;
   }
 }
 
@@ -31,18 +32,20 @@ function readRoleRecord(value: unknown): Record<string, string> {
   return roles;
 }
 
-// `omp config` owns config.yml's format and layering, so settings go through it rather than a
-// YAML reader or rewrite here.
-const runOmpConfig = Effect.fn("runOmpConfig")(function* (
+/** Runs `omp <args>` and returns its stdout; a timeout or non-zero exit fails. */
+export const runOmpSubcommand = Effect.fn("runOmpSubcommand")(function* (
   settings: Pick<OmpSettings, "binaryPath">,
   environment: NodeJS.ProcessEnv,
   cwd: string | undefined,
   args: ReadonlyArray<string>,
+  timeoutMs: number = CONFIG_COMMAND_TIMEOUT_MS,
 ) {
   const command = settings.binaryPath || "omp";
-  const spawnCommand = yield* resolveSpawnCommand(command, ["config", ...args], {
-    env: environment,
-  });
+  const name = args
+    .filter((arg) => !arg.startsWith("-"))
+    .slice(0, 2)
+    .join(" ");
+  const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
   const result = yield* spawnAndCollect(
     command,
     ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -52,17 +55,27 @@ const runOmpConfig = Effect.fn("runOmpConfig")(function* (
     }),
   ).pipe(
     Effect.timeoutOrElse({
-      duration: CONFIG_COMMAND_TIMEOUT_MS,
-      orElse: () => Effect.fail(new OmpConfigError({ detail: "timed out" })),
+      duration: timeoutMs,
+      orElse: () => Effect.fail(new OmpCommandError({ command: name, detail: "timed out" })),
     }),
   );
   if (result.code !== 0) {
-    return yield* new OmpConfigError({
-      detail: `${args[0]} exited with code ${result.code}`,
+    return yield* new OmpCommandError({
+      command: name,
+      detail: `exited with code ${result.code}`,
     });
   }
   return result.stdout;
 });
+
+// `omp config` owns config.yml's format and layering, so settings go through it rather than a
+// YAML reader or rewrite here.
+const runOmpConfig = (
+  settings: Pick<OmpSettings, "binaryPath">,
+  environment: NodeJS.ProcessEnv,
+  cwd: string | undefined,
+  args: ReadonlyArray<string>,
+) => runOmpSubcommand(settings, environment, cwd, ["config", ...args]);
 
 /** The model roles omp resolves from its config (`omp config get modelRoles`). */
 export const readOmpModelRoles = Effect.fn("readOmpModelRoles")(function* (

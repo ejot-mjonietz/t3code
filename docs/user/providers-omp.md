@@ -22,8 +22,9 @@ session, or change its approval mode, because T3 Code owns those.
 
 ## Models and Model Roles
 
-The model picker lists the models omp reports for your signed-in providers, with the thinking
-levels each model accepts. **Auto** lets omp choose a level for each prompt.
+The model picker lists the models omp reports for your signed-in providers, grouped by provider
+(for example GitHub Copilot or Anthropic), with the thinking levels each model accepts. **Auto**
+lets omp choose a level for each prompt.
 
 **omp default** runs omp's `default` model role. The picker also lists omp's **Fast** (`smol`),
 **Thinking** (`slow`) and **Architect** (`plan`) roles when they are configured, so a thread can
@@ -40,6 +41,22 @@ for example `github-copilot/gpt-6-luna:low`. Leave a field empty to keep omp's o
 
 Unless you pick another text generation model, commit messages and thread titles use the fast
 role.
+
+## Usage and Limits
+
+**Usage** counts omp's tokens and cost from omp's own session history, including subagents, so
+work you did in the `omp` CLI counts too. Cost is what omp reports for each model call.
+
+**Limits** shows the subscription windows omp reports for each signed-in provider (`omp usage`),
+each labeled with its provider. Limits are checked when you open or refresh them, not in the
+background.
+
+## Pull Requests
+
+PRs omp creates or merges, through T3 Code's pull request tools or with `gh pr create` and
+`gh pr merge`, are linked to the thread that did it. A thread's pull request views (the
+**Linked items** panel, its sidebar row, the branch badge and thread details) also show the PRs its
+subagents created or merged, labeled with the subagent; open the subagent to manage them.
 
 ## Subagents
 
@@ -91,13 +108,17 @@ of your rules into the conversation, a notice in the thread says so.
 
 ## T3 Code Tools
 
-T3 Code's tools, such as `delegate_task` and the browser preview tools, are available to omp.
-omp loads most of them on demand.
+T3 Code's tools, such as `delegate_task`, the pull request tools and the browser preview tools,
+are available to omp and to omp's subagents. The orchestration tools are always in omp's tool
+list; the rest are commands omp runs on demand, so they don't fill the prompt.
 
 ## Troubleshooting
 
 - **omp is not installed**: install it as above or set its binary path.
 - **No usable models**: run `omp`, then `/login`, and refresh the provider.
+- **A turn stopped at a usage limit**: the thread shows T3 Code's usage limit notice, with the reset
+  time when the provider names one. **Continue** picks the turn up where omp left it.
+- **omp could not authenticate**: the error names the provider; run `omp`, then `/login`.
 - **A slow status check**: set `T3CODE_OMP_PROBE_TIMEOUT_MS` in the server's environment.
 
 T3 Code can also run omp as a generic [ACP agent](./providers-acp.md) with `omp acp`, but that

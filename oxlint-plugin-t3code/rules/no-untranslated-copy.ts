@@ -126,6 +126,7 @@ const PROPER_NOUNS = [
   "OpenCode",
   "Antigravity",
   "Kiro",
+  "Oh My Pi",
   "Pi",
   "Muse Code",
   "OpenAI",

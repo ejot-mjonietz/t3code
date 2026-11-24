@@ -20,6 +20,8 @@ import {
   enrichOmpSnapshot,
 } from "./status.ts";
 import { syncOmpModelRolesToConfig } from "./roles.ts";
+import { ompUsageReader, type OmpUsageReaderEnv } from "./usage.ts";
+import { makeOmpUsageLimitsProbe } from "./usageLimits.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   defaultProviderContinuationIdentity,
@@ -73,12 +75,13 @@ const withInstanceIdentity =
     continuation: { groupKey: input.continuationGroupKey },
   });
 
-export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv, Path.Path> = {
+export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv, OmpUsageReaderEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "Oh My Pi",
     supportsMultipleInstances: true,
   },
+  usage: ompUsageReader,
   configSchema: OmpSettings,
   defaultConfig: (): OmpSettings => decodeOmpSettings({}),
   create: Effect.fn("OmpDriver.create")(function* ({
@@ -164,13 +167,22 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv, Path.Path> = {
       ),
     );
     const textGeneration = yield* makeOmpTextGeneration(effectiveConfig, processEnv);
+    // `omp usage` makes network requests, so only explicit refreshes read quota; passive checks
+    // republish the last reading.
+    const usageLimits = yield* makeOmpUsageLimitsProbe(effectiveConfig, processEnv, probeCwd);
 
     const checkProvider = fileSystem
       .makeDirectory(probeCwd, { recursive: true })
       .pipe(
         Effect.ignore,
         Effect.andThen(
-          checkOmpProviderStatus(effectiveConfig, processEnv, probeCwd, host.compatibility),
+          checkOmpProviderStatus(
+            effectiveConfig,
+            processEnv,
+            probeCwd,
+            host.compatibility,
+            usageLimits.read,
+          ),
         ),
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -185,6 +197,7 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv, Path.Path> = {
       initialSnapshot: (settings) =>
         buildInitialOmpProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
       checkProvider,
+      invalidateUsageCache: usageLimits.invalidate,
       enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
         resolveMaintenance().pipe(
           Effect.flatMap((maintenanceCapabilities) =>
@@ -217,7 +230,11 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv, Path.Path> = {
       displayName,
       accentColor,
       enabled,
-      snapshot,
+      // User refreshes, such as opening the Limits view, read omp's quota first.
+      snapshot: {
+        ...snapshot,
+        refresh: usageLimits.invalidate.pipe(Effect.andThen(snapshot.refresh)),
+      },
       snapshotForCwd: (workspaceCwd) =>
         !effectiveConfig.enabled
           ? snapshot.getSnapshot

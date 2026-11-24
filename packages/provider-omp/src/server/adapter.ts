@@ -98,14 +98,20 @@ import {
   materializeOmpT3Extension,
   resolveOmpLaunchArgs,
 } from "./launch.ts";
-import {
-  OMP_T3_MCP_TOOL_PREFIX,
-  openOmpT3McpHostTools,
-  type OmpT3McpHostTools,
-} from "./mcpHostTools.ts";
+import { OMP_T3_TOOL_INSTRUCTIONS, ompT3InstructionsFileContents } from "./t3ExtensionSource.ts";
 import { parseOmpHtmlForm, type OmpHtmlForm } from "./htmlForm.ts";
 import { isOmpThinkingLevel, parseOmpModelSelector } from "./modelCapabilities.ts";
 import { readOmpModelRoles } from "./roles.ts";
+import {
+  makeOmpTurnUsageTally,
+  ompProviderFailure,
+  ompRetryErrorReport,
+  ompResumeFailure,
+  ompTurnTokenUsage,
+  tallyOmpAssistantMessage,
+  type OmpErrorReport,
+  type OmpTurnUsageTally,
+} from "./turnOutcome.ts";
 import { ompModelRoleOverrides } from "../settings.ts";
 
 const OMP_PROVIDER = ProviderDriverKind.make("omp");
@@ -154,7 +160,7 @@ const OmpProviderCapabilitiesV2 = {
     emitsTurnStarted: true,
     emitsTurnCompleted: true,
     supportsInterrupt: true,
-    supportsNativeResume: false,
+    supportsNativeResume: true,
     supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: false,
     supportsQueuedMessages: true,
@@ -177,7 +183,7 @@ const OmpProviderCapabilitiesV2 = {
   },
   approvals: {
     supportsCommandApproval: true,
-    supportsFileReadApproval: false,
+    supportsFileReadApproval: true,
     supportsFileChangeApproval: true,
     supportsApplyPatchApproval: false,
     approvalsHaveNativeRequestIds: true,
@@ -387,7 +393,7 @@ function compactionTitle(status: OmpCompactionStatus): string {
 
 type OmpMessageTokenUsage = Pick<
   OrchestrationV2ProviderTurnTokenUsage,
-  "inputTokens" | "cachedInputTokens" | "outputTokens"
+  "inputTokens" | "cachedInputTokens" | "outputTokens" | "reasoningOutputTokens"
 >;
 
 /**
@@ -428,6 +434,12 @@ interface ActiveOmpTurn extends OmpItemTarget {
   latestCompactionAfterTokens: number | null;
   lastLiveUsedTokens: number | null;
   lastMessageUsage: OmpMessageTokenUsage | undefined;
+  /** Billed usage of every root assistant message this turn ended. */
+  readonly usageTally: OmpTurnUsageTally;
+  /** omp's task tool started a subagent for this turn. */
+  startedSubagents: boolean;
+  /** The latest model error omp reported this turn; its retry frames carry only the text. */
+  lastModelError: OmpErrorReport | null;
   settleProbeGeneration: number;
   /** An extension may start compaction immediately after omp yields. */
   settleWhenIdle: boolean;
@@ -507,7 +519,20 @@ interface PendingOmpPrompt {
   readonly form: OmpHtmlForm | undefined;
 }
 
-const OMP_FILE_CHANGE_TOOLS = new Set(["edit", "write", "ast_edit", "notebook"]);
+// omp tools whose approval is not a command; read-tier tools ask only in always-ask modes
+// (`ls` comes from omp's legacy pi extension shim).
+const OMP_TOOL_APPROVAL_KINDS: Readonly<Record<string, "file-read" | "file-change">> = {
+  edit: "file-change",
+  write: "file-change",
+  ast_edit: "file-change",
+  notebook: "file-change",
+  read: "file-read",
+  grep: "file-read",
+  glob: "file-read",
+  find: "file-read",
+  ls: "file-read",
+  ast_grep: "file-read",
+};
 
 /**
  * omp asks for tool approval over RPC as a select titled `Allow tool: <name>` with
@@ -519,7 +544,7 @@ export function ompApprovalPrompt(
 ):
   | {
       readonly toolName: string;
-      readonly kind: "command" | "file-change";
+      readonly kind: "command" | "file-read" | "file-change";
       readonly choices: OmpApprovalChoices;
     }
   | undefined {
@@ -531,11 +556,11 @@ export function ompApprovalPrompt(
   const session = options.find(
     (option) => option.startsWith("Approve ") && option.endsWith(" for this session"),
   );
-  // A write to an xd:// device runs that tool; name the tool rather than `write`.
-  const device = /\nPath: xd:\/\/(\S+)/.exec(title)?.[1];
   return {
-    toolName: device ?? toolName,
-    kind: OMP_FILE_CHANGE_TOOLS.has(toolName) && device === undefined ? "file-change" : "command",
+    toolName,
+    kind: Object.hasOwn(OMP_TOOL_APPROVAL_KINDS, toolName)
+      ? OMP_TOOL_APPROVAL_KINDS[toolName]!
+      : "command",
     choices: { once, session, deny },
   };
 }
@@ -666,7 +691,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       yield* provideCacheFs(fileSystem.makeDirectory(instructionsDir, { recursive: true }));
       const instructionsFile = path.join(
         instructionsDir,
-        `${String(input.providerSessionId).replace(/[^A-Za-z0-9_-]/g, "_")}.md`,
+        `${String(input.providerSessionId).replace(/[^A-Za-z0-9_-]/g, "_")}.json`,
       );
       yield* Effect.addFinalizer(() => fileSystem.remove(instructionsFile).pipe(Effect.ignore));
       const modelRolesOverlayPath = options.settings.saveModelRolesToOmpConfig
@@ -682,19 +707,6 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
-      // Turns keep working without T3 tools when the thread's MCP server is unreachable.
-      const hostTools: OmpT3McpHostTools | null =
-        mcpSession === undefined
-          ? null
-          : yield* openOmpT3McpHostTools(mcpSession).pipe(
-              Effect.timeoutOption(Duration.seconds(10)),
-              Effect.map(Option.getOrNull),
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Could not expose T3 Code's MCP tools to omp.", {
-                  errorTag: Cause.squash(cause) instanceof Error ? "Error" : "Unknown",
-                }).pipe(Effect.as(null)),
-              ),
-            );
       // omp resumes a session in the cwd its header names, so a workspace handoff moves it.
       const sessionFileCwd = Effect.fnUntraced(function* (sessionFile: string) {
         const lines = yield* fileSystem.stream(sessionFile).pipe(
@@ -732,9 +744,6 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         yield* connection.request({ type: "set_ask_dialog", enabled: true });
         // "events" adds each subagent's own session, which its child thread shows.
         yield* connection.request({ type: "set_subagent_subscription", level: "events" });
-        if (hostTools !== null && hostTools.definitions.length > 0) {
-          yield* connection.request({ type: "set_host_tools", tools: hostTools.definitions });
-        }
       });
       const startConnection = Effect.fnUntraced(function* (sessionPath?: string) {
         const connectionScope = yield* Scope.fork(scope, "sequential");
@@ -747,6 +756,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             runtimeMode: input.runtimePolicy.runtimeMode,
             extensionPath,
             instructionsFile,
+            mcpSession,
             modelRolesOverlayPath,
           });
           const scopedLaunch = yield* agentScope.wrap({
@@ -841,8 +851,6 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       const sessionApprovals = new Set<string>();
       // omp subagents by id, from their `started` lifecycle frame until a terminal one.
       const ompSubagents = new Map<string, TrackedOmpSubagent>();
-      // Host tool calls in flight, by omp request id, so host_tool_cancel can stop them.
-      const hostToolCalls = new Map<string, Fiber.Fiber<void>>();
       // omp can settle immediately after dialog response; serialize so terminal cannot overtake request resolution.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: OmpThreadState | null = null;
@@ -1120,6 +1128,8 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         const uncachedInputTokens = nonNegativeInteger(usage, "input");
         const cachedInputTokens = nonNegativeInteger(usage, "cacheRead");
         const outputTokens = nonNegativeInteger(usage, "output");
+        // A subset of output, unset when the provider does not report it.
+        const reasoningOutputTokens = nonNegativeInteger(usage, "reasoningTokens");
         return {
           ...(uncachedInputTokens === undefined
             ? {}
@@ -1131,6 +1141,9 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               }),
           ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
           ...(outputTokens === undefined ? {} : { outputTokens }),
+          ...(reasoningOutputTokens === undefined || outputTokens === undefined
+            ? {}
+            : { reasoningOutputTokens: Math.min(outputTokens, reasoningOutputTokens) }),
         };
       };
 
@@ -1256,7 +1269,9 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       const reportLiveUsage =
         /* Provider events include streaming deltas; avoid a span for each update. */
         Effect.fnUntraced(function* (turn: ActiveOmpTurn, usage: unknown) {
-          const usedTokens = nonNegativeInteger(usage, "totalTokens");
+          // contextTokens is the provider's own occupancy figure when it reports one.
+          const usedTokens =
+            nonNegativeInteger(usage, "contextTokens") ?? nonNegativeInteger(usage, "totalTokens");
           if (usedTokens !== undefined && usedTokens > 0) {
             turn.lastMessageUsage = ompMessageTokenUsage(usage);
           }
@@ -1620,22 +1635,6 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           });
         });
 
-      // omp mounts host tools as xd:// devices and runs one by writing its JSON arguments there.
-      const deviceCall = (toolName: string, args: unknown) => {
-        if (toolName !== "write") return undefined;
-        const devicePath = recordString(args, "path");
-        if (devicePath === undefined || !devicePath.startsWith("xd://")) return undefined;
-        const device = devicePath.slice("xd://".length);
-        if (device.length === 0) return undefined;
-        const content = recordString(args, "content");
-        const parsed =
-          content === undefined ? undefined : Option.getOrUndefined(decodeSessionLine(content));
-        return {
-          device,
-          input: Predicate.isObject(parsed) ? parsed : content === undefined ? {} : { content },
-        };
-      };
-
       // omp's todo tool reports its whole list; one item and plan per target show the latest one.
       const emitTodoList = Effect.fnUntraced(function* (
         target: OmpItemTarget,
@@ -1690,27 +1689,24 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       ) {
         const toolCallId = recordString(event, "toolCallId");
         if (toolCallId === undefined) return;
-        const rawToolName =
+        const toolName =
           recordString(event, "toolName") ?? target.toolNames.get(toolCallId) ?? "tool";
         // omp tags every phase of a call made from inside another tool, such as eval.
         const parentToolCallId = recordString(event, "parentToolCallId");
         // A detached task keeps reporting progress on its call after the call returned;
         // its subagent card shows that progress.
-        if (phase === "update" && (rawToolName === "task" || target.endedToolCalls.has(toolCallId)))
+        if (phase === "update" && (toolName === "task" || target.endedToolCalls.has(toolCallId)))
           return;
         if (phase === "end") target.endedToolCalls.add(toolCallId);
-        if (phase === "update" && rawToolName === "bash") {
+        if (phase === "update" && toolName === "bash") {
           yield* emitCommandOutputDelta(target, toolCallId, event["partialResult"]);
           return;
         }
         if (phase === "start") {
-          target.toolNames.set(toolCallId, rawToolName);
+          target.toolNames.set(toolCallId, toolName);
           target.toolArgs.set(toolCallId, event["args"]);
         }
-        const rawArgs = event["args"] ?? target.toolArgs.get(toolCallId);
-        const device = deviceCall(rawToolName, rawArgs);
-        const toolName = device?.device ?? rawToolName;
-        const args = device?.input ?? rawArgs;
+        const args = event["args"] ?? target.toolArgs.get(toolCallId);
         const emittedAt = yield* DateTime.now;
         const startedAt = target.toolStartedAt.get(toolCallId) ?? emittedAt;
         target.toolStartedAt.set(toolCallId, startedAt);
@@ -1769,7 +1765,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           });
           return;
         }
-        if (device === undefined && !isError && (toolName === "edit" || toolName === "write")) {
+        if (!isError && (toolName === "edit" || toolName === "write")) {
           // omp's hashline edit input opens with a `[path#hash]` header naming its file.
           const fileName =
             recordString(details, "path") ??
@@ -2066,6 +2062,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             emittedKey: "",
           };
           ompSubagents.set(id, tracked);
+          turn.startedSubagents = true;
           // A detached subagent outlives the task call; keep ingesting until it ends.
           if (recordField(payload, "detached") === true) {
             if (!backgroundSubagentTurns.has(turn.providerTurn.id)) {
@@ -2223,42 +2220,6 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             yield* emitToolItem(target, event, "end");
             return;
         }
-      });
-
-      const handleHostToolCall = Effect.fnUntraced(function* (event: OmpRpcRecord) {
-        const id = recordString(event, "id");
-        const toolName = recordString(event, "toolName");
-        if (id === undefined || toolName === undefined) return;
-        const activeConnection = connection;
-        const args = recordField(event, "arguments");
-        const call =
-          hostTools === null || !toolName.startsWith(OMP_T3_MCP_TOOL_PREFIX)
-            ? Effect.succeed({
-                result: { content: [{ type: "text", text: `Tool ${toolName} is unavailable.` }] },
-                isError: true,
-              })
-            : hostTools.call(toolName, Predicate.isObject(args) ? args : {}).pipe(
-                Effect.catch((error) =>
-                  Effect.succeed({
-                    result: { content: [{ type: "text", text: error.message }] },
-                    isError: true,
-                  }),
-                ),
-              );
-        const fiber = yield* call.pipe(
-          Effect.flatMap((outcome) =>
-            activeConnection.send({
-              type: "host_tool_result",
-              id,
-              result: outcome.result,
-              ...(outcome.isError ? { isError: true } : {}),
-            }),
-          ),
-          Effect.ignore,
-          Effect.ensuring(Effect.sync(() => hostToolCalls.delete(id))),
-          Effect.forkIn(scope),
-        );
-        hostToolCalls.set(id, fiber);
       });
 
       const cancelPrompt = Effect.fn("OmpAdapter.cancelPrompt")(function* (
@@ -2718,6 +2679,11 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             status: interrupted ? "interrupted" : failure !== null ? "failed" : "completed",
             completedAt,
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
+            turnTokenUsage: ompTurnTokenUsage(turn.usageTally, {
+              completed: !interrupted && failure === null,
+              hasSubagents: turn.startedSubagents,
+              localCommand: turn.promptMayBeCommandOnly && !turn.sawAgentActivity,
+            }),
             ...(turn.reportedModel === undefined ? {} : { model: turn.reportedModel }),
           },
         });
@@ -2864,20 +2830,6 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           yield* updateExtensionStatus(event);
           return;
         }
-        // Host tool calls answer omp directly and may run before any turn owns the session.
-        if (event["type"] === "host_tool_call") {
-          yield* handleHostToolCall(event);
-          return;
-        }
-        if (event["type"] === "host_tool_cancel") {
-          const targetId = recordString(event, "targetId");
-          const fiber = targetId === undefined ? undefined : hostToolCalls.get(targetId);
-          if (targetId !== undefined && fiber !== undefined) {
-            hostToolCalls.delete(targetId);
-            yield* Fiber.interrupt(fiber).pipe(Effect.forkIn(scope));
-          }
-          return;
-        }
         // Model hooks can show dialogs before turn ownership; keep requests session-scoped and buffer output.
         const interactiveUiRequest =
           event["type"] === "extension_ui_request" &&
@@ -2981,16 +2933,24 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             yield* completeOpenStreamItems(turn);
             // Delta updates carry no usage; each finished message reports its own.
             yield* reportLiveUsage(turn, recordField(message, "usage"));
+            tallyOmpAssistantMessage(turn.usageTally, message);
             const reportedProvider = recordString(message, "provider");
             const reportedModelId = recordString(message, "model");
             if (reportedProvider && reportedModelId) {
               turn.reportedModel = `${reportedProvider}/${reportedModelId}`;
             }
             turn.lastAssistantAborted = recordString(message, "stopReason") === "aborted";
-            if (recordString(message, "stopReason") === "error" && turn.failure === null) {
-              turn.failure = makeProviderFailure({
-                message: recordString(message, "errorMessage") ?? "omp reported a model error.",
-                class: "provider_error",
+            if (recordString(message, "stopReason") === "error") {
+              const modelError: OmpErrorReport = {
+                message: recordString(message, "errorMessage"),
+                httpStatus: recordNumber(message, "errorStatus"),
+                errorId: recordNumber(message, "errorId"),
+                provider: reportedProvider,
+              };
+              turn.lastModelError = modelError;
+              turn.failure ??= ompProviderFailure(modelError, {
+                fallbackMessage: "omp reported a model error.",
+                observedAtMs: DateTime.toEpochMillis(yield* DateTime.now),
               });
             }
             return;
@@ -3085,11 +3045,18 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               Math.trunc(recordNumber(event, "maxAttempts") ?? attempt),
             );
             const retryDelayMs = Math.max(0, Math.trunc(recordNumber(event, "delayMs") ?? 0));
-            const failure = makeProviderFailure({
-              message: recordString(event, "errorMessage") ?? "omp provider request failed.",
-              class: "provider_error",
-              retryable: true,
-            });
+            const failure = ompProviderFailure(
+              ompRetryErrorReport(
+                turn.lastModelError,
+                recordString(event, "errorMessage"),
+                recordNumber(event, "errorId"),
+              ),
+              {
+                fallbackMessage: "omp provider request failed.",
+                observedAtMs: DateTime.toEpochMillis(emittedAt),
+                retrying: true,
+              },
+            );
             const current = turn.activeProviderRetry;
             const providerRetry = {
               retry: { attempt, maxAttempts, retryDelayMs },
@@ -3125,11 +3092,14 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               turn.failure = null;
               return;
             }
-            const failure = makeProviderFailure({
-              message: recordString(event, "finalError") ?? "omp auto-retry failed.",
-              class: "provider_error",
-              retryable: false,
-            });
+            const failure = ompProviderFailure(
+              ompRetryErrorReport(turn.lastModelError, recordString(event, "finalError")),
+              {
+                fallbackMessage: "omp auto-retry failed.",
+                observedAtMs: DateTime.toEpochMillis(emittedAt),
+                retryable: false,
+              },
+            );
             const attempt = Math.max(1, Math.trunc(recordNumber(event, "attempt") ?? 1));
             const current = turn.activeProviderRetry;
             const providerRetry = {
@@ -3224,12 +3194,20 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             // Reports a prompt that failed or ran locally without starting the agent.
             if (turn === null || recordString(event, "id") !== turn.turnStartPromptId) return;
             if (recordString(event, "status") === "error" && turn.failure === null) {
-              turn.failure = makeProviderFailure({
-                message:
-                  recordString(recordField(event, "error"), "message") ?? "omp failed the prompt.",
-                class: "provider_error",
-                retryable: recordField(recordField(event, "error"), "retryable") === true,
-              });
+              const error = recordField(event, "error");
+              turn.failure = ompProviderFailure(
+                {
+                  message: recordString(error, "message"),
+                  httpStatus: recordNumber(error, "httpStatus"),
+                  provider: recordString(error, "provider"),
+                  code: recordString(error, "code"),
+                },
+                {
+                  fallbackMessage: "omp failed the prompt.",
+                  observedAtMs: DateTime.toEpochMillis(yield* DateTime.now),
+                  retryable: recordField(error, "retryable") === true,
+                },
+              );
             }
             if (recordField(event, "agentInvoked") === false && !turn.sawAgentActivity) {
               turn.promptMayBeCommandOnly = true;
@@ -3297,10 +3275,13 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                 return;
               }
               if (!compactTurn.compactionCancelled) {
-                compactTurn.failure = makeProviderFailure({
-                  message: recordString(event, "error") ?? "omp compact failed.",
-                  class: "provider_error",
-                });
+                compactTurn.failure = ompProviderFailure(
+                  { message: recordString(event, "error") },
+                  {
+                    fallbackMessage: "omp compact failed.",
+                    observedAtMs: DateTime.toEpochMillis(yield* DateTime.now),
+                  },
+                );
                 if (state !== null) yield* finalizeTurn(state);
                 return;
               }
@@ -3310,12 +3291,13 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               return;
             }
             const responseId = recordString(event, "id");
-            const promptIndex =
-              command !== "prompt"
-                ? -1
-                : responseId === undefined
-                  ? 0
-                  : pendingPromptResponses.findIndex((pending) => pending.id === responseId);
+            // A resume answers like a prompt but never gets a prompt_result.
+            const turnInputCommand = command === "prompt" || command === "resume";
+            const promptIndex = !turnInputCommand
+              ? -1
+              : responseId === undefined
+                ? 0
+                : pendingPromptResponses.findIndex((pending) => pending.id === responseId);
             const pendingPrompt =
               promptIndex < 0 ? undefined : pendingPromptResponses.splice(promptIndex, 1)[0];
             if (
@@ -3380,6 +3362,22 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               return;
             }
             if (event["success"] !== false) return;
+            // omp answers a resume once the continuation is under way and reports a later failure under the same id.
+            if (
+              command === "resume" &&
+              pendingPrompt === undefined &&
+              turn !== null &&
+              responseId !== undefined &&
+              responseId === turn.turnStartPromptId
+            ) {
+              turn.failure ??= ompResumeFailure(
+                recordString(event, "error"),
+                DateTime.toEpochMillis(yield* DateTime.now),
+              );
+              turn.settleWhenIdle = true;
+              yield* scheduleSettleProbe(turn, true);
+              return;
+            }
             if (command === "steer" || pendingPrompt?.kind === "steer") {
               // A rejected steer refuses only that message; its target turn keeps running.
               yield* Effect.logWarning("omp rejected a steer message.", {
@@ -3390,17 +3388,22 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               return;
             }
             const failedTurn =
-              command === "prompt" && pendingPrompt?.kind === "turn_start"
+              turnInputCommand && pendingPrompt?.kind === "turn_start"
                 ? responseTurn
                 : command === "parse"
                   ? turn
                   : null;
             if (failedTurn !== null) {
-              const failure = makeProviderFailure({
-                message: recordString(event, "error") ?? "omp rejected the prompt.",
-                class: "provider_error",
-              });
-              if (failedTurn.adoptedWake && command === "prompt") {
+              const rejection = recordString(event, "error");
+              const observedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+              const failure =
+                command === "resume"
+                  ? ompResumeFailure(rejection, observedAtMs)
+                  : ompProviderFailure(
+                      { message: rejection },
+                      { fallbackMessage: "omp rejected the prompt.", observedAtMs },
+                    );
+              if (failedTurn.adoptedWake && turnInputCommand) {
                 failedTurn.rejectedPromptFailure = failure;
                 failedTurn.settleWhenIdle = true;
                 yield* scheduleSettleProbe(failedTurn, true);
@@ -3968,30 +3971,36 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         }
       });
 
-      // The instructions extension reads this file before each agent run.
+      // The T3 extension reads this file before each agent run and appends the variant that
+      // matches whether it could register T3 Code's tools.
       const writeInstructions = Effect.fnUntraced(function* (
         turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
       ) {
-        const hasT3Mcp = hostTools !== null;
-        const instructions = [
-          buildRuntimeInstructions({
-            harness: "omp (oh-my-pi)",
-            agentFeedback: hasT3Mcp ? (turnInput.agentFeedback ?? "off") : "off",
-            model: turnInput.modelSelection.model,
-            pullRequestLinking: hasT3Mcp,
-            runtimePolicy: turnInput.runtimePolicy,
-          }),
-          t3OrchestrationSystemPrompt(hasT3Mcp, mcpSession?.capabilities?.has("device") === true),
-          hasT3Mcp && mcpSession?.browserToolsAvailable === true
-            ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS
-            : undefined,
-          hasT3Mcp
-            ? "T3 Code tools are named `mcp__t3-code__<tool>`. Those not listed as tools are mounted as `xd://mcp__t3-code__<tool>` devices: read the device for its schema, then write JSON arguments to it to call the tool. To wait for a background shell you started (tests, a build), call `t3_background_wait` with its shell ID before you end your turn."
-            : undefined,
-        ]
-          .filter((part): part is string => part !== undefined && part.trim().length > 0)
-          .map((part) => part.trim())
-          .join("\n\n");
+        const instructionsFor = (hasT3Mcp: boolean) =>
+          [
+            buildRuntimeInstructions({
+              harness: "omp (oh-my-pi)",
+              agentFeedback: hasT3Mcp ? (turnInput.agentFeedback ?? "off") : "off",
+              model: turnInput.modelSelection.model,
+              pullRequestLinking: hasT3Mcp,
+              runtimePolicy: turnInput.runtimePolicy,
+            }),
+            t3OrchestrationSystemPrompt(hasT3Mcp, mcpSession?.capabilities?.has("device") === true),
+            hasT3Mcp && mcpSession?.browserToolsAvailable === true
+              ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS
+              : undefined,
+            hasT3Mcp ? OMP_T3_TOOL_INSTRUCTIONS : undefined,
+            hasT3Mcp && mcpSession?.capabilities?.has("background-wait") === true
+              ? "To wait for a background shell you started (tests, a build), call `mcp__t3-code__t3_background_wait` with its shell ID before you end your turn."
+              : undefined,
+          ]
+            .filter((part): part is string => part !== undefined && part.trim().length > 0)
+            .map((part) => part.trim())
+            .join("\n\n");
+        const instructions = ompT3InstructionsFileContents({
+          withT3Tools: mcpSession === undefined ? undefined : instructionsFor(true),
+          withoutT3Tools: instructionsFor(false),
+        });
         if (instructions === appliedInstructions) return;
         yield* fileSystem.writeFileString(instructionsFile, instructions);
         appliedInstructions = instructions;
@@ -4081,6 +4090,9 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             ...turnInput,
             message: { ...turnInput.message, text: "/compact" },
           }),
+        // omp's RPC `resume` is the TUI's Continue: it re-answers an unanswered prompt or prompts a continuation.
+        resumeTurn: (resumeInput) =>
+          runtime.startTurn(ProviderAdapter.resumeTurnInput(resumeInput)),
         startTurn: Effect.fn("OmpAdapter.startTurn")(
           function* (turnInput) {
             if (registrationInProgress)
@@ -4126,11 +4138,12 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             }
             // Resolve attachments before turn installation so failures cannot strand activeTurn.
             // Inject instructions through before_agent_start; wrapping user text breaks slash-command expansion.
-            const compactCommand = continuation
-              ? null
-              : parseOmpCompactCommand(turnInput.message.text);
+            // Native resume continues omp's own conversation; it sends no message.
+            const resume = turnInput.resume === true;
+            const compactCommand =
+              continuation || resume ? null : parseOmpCompactCommand(turnInput.message.text);
             const payload =
-              !continuation && compactCommand === null
+              !continuation && !resume && compactCommand === null
                 ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
                 : null;
             const startedAt = yield* DateTime.now;
@@ -4182,6 +4195,9 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               lastMessageUsage: undefined,
+              usageTally: makeOmpTurnUsageTally(),
+              startedSubagents: false,
+              lastModelError: null,
               settleProbeGeneration: 0,
               settleWhenIdle: false,
               compactionCancelled: false,
@@ -4220,12 +4236,26 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                 };
                 state.activeTurn = activeTurn;
                 activeTurn.adoptedWake = wake !== null && !continuation;
+                // A wake that is still running already continues the conversation; resume would interrupt it.
+                let wakeRunning = false;
+                for (const event of wake?.events ?? []) {
+                  if (event["type"] === "agent_start") wakeRunning = true;
+                  else if (event["type"] === "agent_settled") wakeRunning = false;
+                }
                 if (compactCommand !== null) {
                   yield* connection.send(compactRpcRecord(compactCommand));
                   pendingCompactResponses.push({
                     providerTurnId: providerTurn.id,
                     kind: "turn_start",
                   });
+                } else if (resume) {
+                  if (!wakeRunning) {
+                    yield* sendPrompt({
+                      providerTurnId: providerTurn.id,
+                      kind: "turn_start",
+                      record: { type: "resume" },
+                    });
+                  }
                 } else if (payload !== null) {
                   yield* sendPrompt({
                     providerTurnId: providerTurn.id,
@@ -4253,6 +4283,8 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                 if (wake !== null) {
                   for (const event of wake.events) {
                     if (!continuation && event["type"] === "agent_settled") {
+                      // A resume starts its own run; only that run settles the turn.
+                      if (resume) continue;
                       activeTurn.nativeAborted = event["aborted"] === true;
                       activeTurn.settleWhenIdle = true;
                       continue;
