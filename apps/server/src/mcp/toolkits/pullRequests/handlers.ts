@@ -262,6 +262,20 @@ function projectForPullRequest(
   return projects.find(matches);
 }
 
+/** Another layer of `target`'s stack, at the URL its host gives that number. */
+function stackLayerTarget(target: ResolvedTarget, number: number): ResolvedTarget | null {
+  const parsed = sourceControlDefinitions.parseChangeRequestUrl(target.url);
+  if (parsed === null) return null;
+  const { definition, link } = parsed;
+  const url = definition.changeRequestUrl({
+    host: link.host,
+    repository: link.repository,
+    number,
+    webUrl: link.repositoryUrl,
+  });
+  return url === null ? null : { host: target.host, repository: target.repository, number, url };
+}
+
 const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -695,9 +709,11 @@ const make = Effect.gen(function* () {
     return result;
   });
 
+  // A PR the thread opened or merged is its work, so it shows there; a dismissed one comes back.
   const linkToThread = Effect.fn("PullRequestsToolkit.linkToThread")(function* (
     thread: OrchestrationV2ThreadShell,
     target: ResolvedTarget,
+    action: "create" | "merge",
   ) {
     if (
       threadPullRequestsOf(thread).some(
@@ -709,13 +725,13 @@ const make = Effect.gen(function* () {
     yield* engine
       .dispatch({
         type: "thread.pull-request.link",
-        commandId: yield* commandId("mcp-pr-create", thread.id),
+        commandId: yield* commandId(`mcp-pr-${action}`, thread.id),
         threadId: thread.id,
         host: target.host,
         repository: target.repository,
         number: target.number,
         url: target.url,
-        source: "created",
+        source: action === "create" ? "created" : "agent",
       })
       .pipe(Effect.catchCause(dispatchFailure(PullRequestLinkFailedError)));
   });
@@ -1070,7 +1086,7 @@ const make = Effect.gen(function* () {
           });
         }
         const target = yield* resolveTarget({ url: created.url }, project);
-        yield* linkToThread(thread, target);
+        yield* linkToThread(thread, target, "create");
         return {
           ...identityOf(target),
           created: created.status === "created",
@@ -1194,8 +1210,8 @@ const make = Effect.gen(function* () {
     ),
     pull_request_merge: McpToolAccess.writesWithCapability((input) =>
       Effect.gen(function* () {
-        const { target, ref } = yield* locate(input);
-        const stack = input.stack === true ? yield* stackMergeScope(ref, input) : {};
+        const { thread, target, ref } = yield* locate(input);
+        const stack = input.stack === true ? yield* stackMergeScope(ref, input) : undefined;
         yield* pullRequests
           .runAction({
             ...ref,
@@ -1205,6 +1221,24 @@ const make = Effect.gen(function* () {
             ...stack,
           })
           .pipe(Effect.mapError(forgeFailure));
+        // Layers below the PR merged with it; a layer the user dismissed stays dismissed.
+        const layers = (stack?.expectedStackHeads ?? []).flatMap(({ number }) => {
+          const layer = number === target.number ? null : stackLayerTarget(target, number);
+          return layer === null ||
+            threadPullRequestsOf(thread).some((link) => threadPullRequestKeysEqual(link, layer))
+            ? []
+            : [layer];
+        });
+        // The merge happened, so a failed link only logs: an error would read as a failed merge.
+        yield* Effect.forEach(
+          [target, ...layers],
+          (merged) => linkToThread(thread, merged, "merge"),
+          { discard: true },
+        ).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("linking a merged pull request failed", error.cause),
+          ),
+        );
         const after = yield* pullRequests
           .summary({ ...ref, allowStale: false })
           .pipe(Effect.mapError(forgeFailure));

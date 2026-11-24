@@ -157,7 +157,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import { AsyncResult } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { isElectron } from "../env";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
 import { composerRequiresModifier } from "../composer-logic";
@@ -267,7 +267,7 @@ import { revisionedQuery } from "../state/revisionedQuery";
 import { useEnvironmentScope } from "~/state/session";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
 import { hostEnvironmentIdAtom } from "../state/primaryEnvironment";
-import { threadEnvironment } from "../state/threads";
+import { environmentThreadShells, threadEnvironment } from "../state/threads";
 import {
   resolveProviderSkillsForCwd,
   resolveProvidersForCwd,
@@ -428,6 +428,9 @@ const EMPTY_AUTO_UPDATE_ENVIRONMENTS: ReadonlyArray<EnvironmentPresentation> = [
 const EMPTY_COMPOSER_BANNER_ITEMS: ReadonlyArray<ComposerBannerStackItem> = [];
 
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
+const NO_DESCENDANT_PULL_REQUESTS_ATOM = Atom.make<ReadonlyArray<unknown>>([]).pipe(
+  Atom.withLabel("web-chat:no-descendant-pull-requests"),
+);
 
 type ChatViewProps =
   | {
@@ -2097,8 +2100,15 @@ export default function ChatView(props: ChatViewProps) {
   const visiblePullRequestCount = visiblePullRequests.length;
   const pullRequestsSurfaceAvailable =
     isServerThread && supportsThreadPullRequests && visiblePullRequestCount > 0;
+  // Subagents' links show in this thread's linked items too, without opening it proactively.
+  const descendantPullRequestCount = useAtomValue(
+    activeThreadRef === null
+      ? NO_DESCENDANT_PULL_REQUESTS_ATOM
+      : environmentThreadShells.descendantPullRequestsAtom(activeThreadRef),
+  ).length;
   const linkedItemsSurfaceAvailable =
     pullRequestsSurfaceAvailable ||
+    (isServerThread && supportsThreadPullRequests && descendantPullRequestCount > 0) ||
     (isServerThread && (activeThreadShell?.issues?.length ?? 0) > 0);
   const { state: deviceState, loaded: deviceStateLoaded } = useDeviceState(
     activeThreadRef?.environmentId ?? null,

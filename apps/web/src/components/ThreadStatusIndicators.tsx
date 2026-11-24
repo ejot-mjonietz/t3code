@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import { pipe } from "effect/Function";
 import { changeRequestTermKind, type ChangeRequestTermKind } from "./pullRequest/changeRequestTerm";
 import {
@@ -11,6 +12,10 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 import { pullRequestDetailToVcsStatus } from "@t3tools/client-runtime/state/pull-requests";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
+  rollUpThreadPullRequests,
+  type ThreadDescendantPullRequest,
+} from "@t3tools/client-runtime/state/threads";
+import {
   resolveEnvironmentMachineKind,
   type EnvironmentId,
   type ScopedThreadRef,
@@ -19,11 +24,12 @@ import {
   type VcsStatusResult,
 } from "@t3tools/contracts";
 import { msg, T, useGT, useMessages } from "gt-react";
-import { TerminalIcon } from "lucide-react";
+import { BotIcon, TerminalIcon } from "lucide-react";
 import { m, type MessageResolver } from "../i18n/messages";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useProject } from "../state/entities";
+import { environmentThreadShells } from "../state/threads";
 import {
   pullRequestListLines,
   resolveThreadCurrentPullRequestLink,
@@ -119,9 +125,15 @@ export function useLinkedThreadPullRequest(
       };
 }
 
-/** The pull request a thread shows: its current link, else the one found for its branch. */
+const NO_PULL_REQUESTS: ReadonlyArray<ThreadPullRequestLink> = [];
+const NO_DESCENDANT_PULL_REQUESTS: ReadonlyArray<ThreadDescendantPullRequest> = [];
+
+/**
+ * The pull request a thread shows: its current link, else the one found for its branch. Its
+ * subagents' links count too, as on its sidebar row; see rollUpThreadPullRequests.
+ */
 export function useThreadDisplayedPullRequest(
-  environmentId: EnvironmentId,
+  threadRef: ScopedThreadRef,
   thread: Pick<
     EnvironmentThreadShell,
     "pullRequests" | "linkedPullRequest" | "branchPullRequest"
@@ -130,21 +142,31 @@ export function useThreadDisplayedPullRequest(
   branchSourceControlProvider?: VcsStatusResult["sourceControlProvider"],
 ) {
   const m = useMessages();
+  const environmentId = threadRef.environmentId;
   const supportsLinks = useSupportsMultiplePullRequests(environmentId);
+  const descendantLinks = useAtomValue(
+    environmentThreadShells.descendantPullRequestsAtom(threadRef),
+  );
+  const { pullRequests, descendants } = rollUpThreadPullRequests(
+    thread?.pullRequests ?? NO_PULL_REQUESTS,
+    descendantLinks,
+  );
   const linkedStatus = useLinkedThreadPullRequest(
     environmentId,
     thread?.linkedPullRequest,
     true,
-    thread?.pullRequests,
+    pullRequests,
     thread?.branchPullRequest,
   );
-  const currentLink = supportsLinks
-    ? resolveThreadCurrentPullRequestLink(thread?.pullRequests ?? [])
-    : null;
+  const currentLink = supportsLinks ? resolveThreadCurrentPullRequestLink(pullRequests) : null;
   const pr = linkedStatus?.pr ?? (currentLink === null ? branchPr : null);
   return {
     currentLink,
-    badge: supportsLinks ? resolveThreadPullRequestBadge(thread?.pullRequests) : null,
+    /** The thread's own links, then its subagents' that it lacks. */
+    pullRequests,
+    /** The subagent links in `pullRequests`, each with the subagent it comes from. */
+    descendants,
+    badge: supportsLinks ? resolveThreadPullRequestBadge(pullRequests) : null,
     pr,
     status: prStatusIndicator(
       pr,
@@ -397,6 +419,7 @@ export function ThreadPullRequestBadgeControl({
   render,
   badge,
   pullRequests,
+  descendants = NO_DESCENDANT_PULL_REQUESTS,
   number,
   url,
   status,
@@ -406,6 +429,8 @@ export function ThreadPullRequestBadgeControl({
   render: ReactElement<{ render?: useRender.RenderProp }>;
   badge: ThreadPullRequestBadge | null;
   pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  /** The subagent links in `pullRequests`, which its list names the subagent of. */
+  descendants?: ReadonlyArray<ThreadDescendantPullRequest>;
   number?: number | undefined;
   url?: string | undefined;
   status: PrStatusIndicator | null;
@@ -424,6 +449,7 @@ export function ThreadPullRequestBadgeControl({
       number={number}
       status={status}
       pullRequests={pullRequests}
+      descendants={descendants}
       onOpenList={onOpenList}
       onOpenPullRequest={onOpenPullRequest}
     />
@@ -438,6 +464,7 @@ function PullRequestBadge({
   number,
   status,
   pullRequests,
+  descendants,
   onOpenList,
   onOpenPullRequest,
 }: {
@@ -448,6 +475,7 @@ function PullRequestBadge({
   number: number | undefined;
   status: PrStatusIndicator | null;
   pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  descendants: ReadonlyArray<ThreadDescendantPullRequest>;
   onOpenList: () => void;
   onOpenPullRequest: (event: MouseEvent<HTMLElement>, url?: string) => void;
 }) {
@@ -492,6 +520,7 @@ function PullRequestBadge({
           {visibleThreadPullRequests(pullRequests).length > 0 ? (
             <ThreadPullRequestsMiniList
               pullRequests={pullRequests}
+              descendants={descendants}
               onOpenPullRequest={onOpenPullRequest}
             />
           ) : number !== undefined && url !== undefined ? (
@@ -513,11 +542,15 @@ function PullRequestBadge({
 
 export function ThreadPullRequestsMiniList({
   pullRequests,
+  descendants = NO_DESCENDANT_PULL_REQUESTS,
   onOpenPullRequest,
 }: {
   pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  /** The subagent links in `pullRequests`, named with the subagent they come from. */
+  descendants?: ReadonlyArray<ThreadDescendantPullRequest>;
   onOpenPullRequest?: (event: MouseEvent<HTMLAnchorElement>, url: string) => void;
 }) {
+  const gt = useGT();
   const lines = pipe(
     visibleThreadPullRequests(pullRequests),
     resolveThreadPullRequestChains,
@@ -532,6 +565,7 @@ export function ThreadPullRequestsMiniList({
           snapshot === null
             ? null
             : resolvePullRequestState({ state: snapshot.state, isDraft: snapshot.isDraft });
+        const origin = descendants.find((entry) => entry.link === line.link);
         return (
           <ThreadPullRequestMiniListItem
             key={`${line.link.host}/${line.link.repository}#${line.link.number}`}
@@ -542,8 +576,23 @@ export function ThreadPullRequestsMiniList({
             depth={line.depth}
             onOpenPullRequest={onOpenPullRequest}
           >
+            {origin === undefined ? null : (
+              <span className="ml-auto flex max-w-[45%] min-w-0 shrink items-center gap-1 pl-1 text-3xs text-muted-foreground">
+                <BotIcon aria-hidden className="size-3 shrink-0" />
+                <span className="sr-only">
+                  {gt("From subagent {title}", { title: origin.threadTitle })}
+                </span>
+                <span aria-hidden className="truncate">
+                  {origin.threadTitle}
+                </span>
+              </span>
+            )}
             {line.stack ? (
-              <span className="ml-auto shrink-0 pl-1 text-3xs">
+              <span
+                className={
+                  origin === undefined ? "ml-auto shrink-0 pl-1 text-3xs" : "shrink-0 pl-1 text-3xs"
+                }
+              >
                 {line.stack.kind === "native" ? (
                   <T context="a native stack of pull requests">stack</T>
                 ) : (

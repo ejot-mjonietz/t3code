@@ -12,12 +12,21 @@ import {
   isListedThreadLineage,
   isProviderNativeSubagentThread,
   OrchestrationV2ThreadShell,
+  ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
+import {
+  threadPullRequestKeyOf,
+  threadPullRequestsOf,
+  visibleThreadPullRequests,
+} from "../threadPullRequests.ts";
+
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
 import { presentThreadShell, threadRuntimeIsActive } from "./models.ts";
+import { formatSubagentDisplayTitle } from "./subagentDisplay.ts";
 import { hiddenThreadKeys, NO_HIDDEN_THREADS } from "./threadTagFilter.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import {
@@ -41,6 +50,13 @@ const EMPTY_THREAD_SHELLS: ReadonlyArray<EnvironmentThreadShell> = Object.freeze
 const EMPTY_THREAD_REFS_BY_PROJECT: ReadonlyMap<
   ProjectId,
   ReadonlyArray<ScopedThreadRef>
+> = new Map();
+const EMPTY_DESCENDANT_PULL_REQUESTS: ReadonlyArray<ThreadDescendantPullRequest> = Object.freeze(
+  [],
+);
+const EMPTY_DESCENDANT_PULL_REQUESTS_BY_THREAD: ReadonlyMap<
+  ThreadId,
+  ReadonlyArray<ThreadDescendantPullRequest>
 > = new Map();
 
 // An async question outlives the subagent's run, but once that run ends the
@@ -229,6 +245,125 @@ export function childThreadInputsTitle(
   );
 }
 
+/** A pull request linked to a subagent below a thread, which that thread lists without owning. */
+export interface ThreadDescendantPullRequest {
+  readonly link: ThreadPullRequestLink;
+  /** The subagent thread that owns the link. */
+  readonly threadId: ThreadId;
+  readonly threadTitle: string;
+  /** 1 for a direct subagent, 2 for one of its subagents, and so on. */
+  readonly depth: number;
+}
+
+/**
+ * The visible pull request links of every thread's subagents, nested ones included, by ancestor.
+ * Each pull request appears once per ancestor, from its nearest subagent (the earliest created
+ * among equals). Only subagent edges roll up: a fork or side chat keeps its links to itself.
+ */
+export function descendantPullRequestsByThread(
+  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+): ReadonlyMap<ThreadId, ReadonlyArray<ThreadDescendantPullRequest>> {
+  const sources: Array<{
+    readonly thread: OrchestrationV2ThreadShell;
+    readonly links: ReadonlyArray<ThreadPullRequestLink>;
+  }> = [];
+  for (const thread of threads) {
+    if (thread.lineage.relationshipToParent !== "subagent") continue;
+    const links = visibleThreadPullRequests(threadPullRequestsOf(thread));
+    if (links.length > 0) sources.push({ thread, links });
+  }
+  if (sources.length === 0) return EMPTY_DESCENDANT_PULL_REQUESTS_BY_THREAD;
+  sources.sort(
+    (left, right) =>
+      DateTime.toEpochMillis(left.thread.createdAt) -
+        DateTime.toEpochMillis(right.thread.createdAt) ||
+      left.thread.id.localeCompare(right.thread.id),
+  );
+  const threadsById = new Map(threads.map((thread) => [thread.id, thread] as const));
+  const byAncestor = new Map<ThreadId, ThreadDescendantPullRequest[]>();
+  for (const { thread, links } of sources) {
+    const threadTitle = formatSubagentDisplayTitle(thread.title);
+    const visited = new Set<ThreadId>([thread.id]);
+    let ancestorId = thread.lineage.parentThreadId;
+    for (let depth = 1; ancestorId !== null && !visited.has(ancestorId); depth += 1) {
+      visited.add(ancestorId);
+      let entries = byAncestor.get(ancestorId);
+      if (entries === undefined) {
+        entries = [];
+        byAncestor.set(ancestorId, entries);
+      }
+      for (const link of links) entries.push({ link, threadId: thread.id, threadTitle, depth });
+      const ancestor = threadsById.get(ancestorId);
+      ancestorId =
+        ancestor?.lineage.relationshipToParent === "subagent"
+          ? ancestor.lineage.parentThreadId
+          : null;
+    }
+  }
+  const result = new Map<ThreadId, ReadonlyArray<ThreadDescendantPullRequest>>();
+  for (const [ancestorId, entries] of byAncestor) {
+    // Stable, so subagents at one depth keep their creation order.
+    entries.sort((left, right) => left.depth - right.depth);
+    const seen = new Set<string>();
+    result.set(
+      ancestorId,
+      entries.filter((entry) => {
+        const key = threadPullRequestKeyOf(entry.link);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }),
+    );
+  }
+  return result;
+}
+
+export interface ThreadPullRequestRollup {
+  /** The thread's own links, dismissed ones included, then the descendant links it lacks. */
+  readonly pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  /** The descendant links in `pullRequests`, each with the subagent it comes from. */
+  readonly descendants: ReadonlyArray<ThreadDescendantPullRequest>;
+}
+
+/**
+ * A thread's own pull request links with its subagents'. An own link, a dismissed one too, wins
+ * over a descendant's link to the same pull request, so it keeps the thread's own actions. Without
+ * descendant links, `pullRequests` is `own` itself.
+ */
+export function rollUpThreadPullRequests(
+  own: ReadonlyArray<ThreadPullRequestLink>,
+  descendants: ReadonlyArray<ThreadDescendantPullRequest>,
+): ThreadPullRequestRollup {
+  if (descendants.length === 0) {
+    return { pullRequests: own, descendants: EMPTY_DESCENDANT_PULL_REQUESTS };
+  }
+  const ownKeys = new Set(own.map((link) => threadPullRequestKeyOf(link)));
+  const kept = descendants.filter((entry) => !ownKeys.has(threadPullRequestKeyOf(entry.link)));
+  return kept.length === 0
+    ? { pullRequests: own, descendants: EMPTY_DESCENDANT_PULL_REQUESTS }
+    : { pullRequests: [...own, ...kept.map((entry) => entry.link)], descendants: kept };
+}
+
+const samePullRequestLink = Schema.toEquivalence(ThreadPullRequestLink);
+
+function sameDescendantPullRequests(
+  left: ReadonlyArray<ThreadDescendantPullRequest>,
+  right: ReadonlyArray<ThreadDescendantPullRequest>,
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((entry, index) => {
+      const other = right[index]!;
+      return (
+        entry.threadId === other.threadId &&
+        entry.threadTitle === other.threadTitle &&
+        entry.depth === other.depth &&
+        (entry.link === other.link || samePullRequestLink(entry.link, other.link))
+      );
+    })
+  );
+}
+
 const sameWireThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
 
 // While a run streams, the server bumps the shell's timestamps, item counts and
@@ -333,6 +468,29 @@ export function createEnvironmentThreadShellAtoms(input: {
       return byParent ?? EMPTY_SIDE_CHATS_BY_PARENT;
     }).pipe(Atom.withLabel(`environment-side-chats-by-parent:${environmentId}`)),
   );
+
+  // Subagent pull request links by every ancestor they roll up to, built once per change for
+  // every row. Without a subagent link it stays the same empty map, so rows do no work.
+  const environmentDescendantPullRequestsAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) =>
+      descendantPullRequestsByThread(get(environmentThreadsAtom(environmentId))),
+    ).pipe(Atom.withLabel(`environment-descendant-pull-requests:${environmentId}`)),
+  );
+
+  // A thread's descendant links. A streaming subagent changes its shell several times a second,
+  // so the old array stays while nothing the links show changed.
+  const descendantPullRequestsAtomFamily = Atom.family((key: string) => {
+    const ref = parseThreadKey(key);
+    let previous = EMPTY_DESCENDANT_PULL_REQUESTS;
+    return Atom.make((get) => {
+      const next =
+        get(environmentDescendantPullRequestsAtom(ref.environmentId)).get(ref.threadId) ??
+        EMPTY_DESCENDANT_PULL_REQUESTS;
+      if (sameDescendantPullRequests(previous, next)) return previous;
+      previous = next;
+      return next;
+    }).pipe(Atom.withLabel(`environment-thread-descendant-pull-requests:${key}`));
+  });
 
   // What an environment's own subagents ask. Kept apart from the tasks other
   // environments run for it, so two environments delegating to each other
@@ -813,5 +971,8 @@ export function createEnvironmentThreadShellAtoms(input: {
     quietThreadShellAtom: (ref: ScopedThreadRef) => quietThreadShellAtomFamily(threadKey(ref)),
     childThreadInputsAtom: (ref: ScopedThreadRef) => childThreadInputsAtomFamily(threadKey(ref)),
     sideChatsAtom: (ref: ScopedThreadRef) => sideChatsAtomFamily(threadKey(ref)),
+    /** Its subagents' pull request links, nested ones too; see rollUpThreadPullRequests. */
+    descendantPullRequestsAtom: (ref: ScopedThreadRef) =>
+      descendantPullRequestsAtomFamily(threadKey(ref)),
   };
 }

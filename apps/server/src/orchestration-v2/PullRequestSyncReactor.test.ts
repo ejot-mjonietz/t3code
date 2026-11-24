@@ -76,6 +76,23 @@ function makeProject(id: ProjectId = PROJECT_ID): OrchestrationProjectShell {
   };
 }
 
+/** The project as the pull request service addresses it, its checkout on GitHub. */
+const ADDRESSED_PROJECT: OrchestrationProjectShell = {
+  ...makeProject(),
+  repositoryIdentity: {
+    canonicalKey: "github.com/owner/repository",
+    locator: {
+      source: "git-remote",
+      remoteName: "origin",
+      remoteUrl: "git@github.com:owner/repository.git",
+    },
+    provider: SourceControlProviderKind.make("github"),
+    displayName: "owner/repository",
+    owner: "owner",
+    name: "repository",
+  },
+};
+
 function makeThread(
   id: string,
   overrides: Partial<PullRequestTestThread> = {},
@@ -250,6 +267,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
       stack,
       invalidate: options.invalidate ?? (() => Effect.void),
       subscribeStateChanges: Effect.succeed(Stream.fromQueue(stateChanges)),
+      addressedProject: () => Effect.succeed(ADDRESSED_PROJECT),
     }),
     Layer.mock(GitManager.GitManager)({
       subscribePullRequestStateChanges: Effect.succeed(Stream.empty),
@@ -285,6 +303,13 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
       getShellSnapshot: () =>
         Ref.update(shellSnapshotReads, (count) => count + 1).pipe(
           Effect.andThen(Effect.die(new Error("pull request sync must not read the shell"))),
+        ),
+      getThreadShell: (threadId) =>
+        Ref.get(snapshots).pipe(
+          Effect.map((snapshot) => {
+            const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
+            return thread === undefined ? null : v2PullRequestThread(thread);
+          }),
         ),
       dispatch,
       streamDomainEvents: Stream.fromQueue(domainEvents),
@@ -384,6 +409,7 @@ function commandRan(
   input: string,
   output?: string,
   name = "command",
+  ended: { readonly status?: "completed" | "failed"; readonly exitCode?: number } = {},
 ): OrchestrationV2DomainEvent {
   const runId = RunId.make(`run:${threadId}:1`);
   const at = DateTime.makeUnsafe(NOW);
@@ -403,7 +429,7 @@ function commandRan(
       nativeItemRef: null,
       parentItemId: null,
       ordinal: 1,
-      status: "completed",
+      status: ended.status ?? "completed",
       title: null,
       startedAt: at,
       completedAt: at,
@@ -411,6 +437,7 @@ function commandRan(
       type: "command_execution",
       input,
       ...(output === undefined ? {} : { output }),
+      ...(ended.exitCode === undefined ? {} : { exitCode: ended.exitCode }),
     },
   };
 }
@@ -541,6 +568,39 @@ const linksFrom = Effect.fn("linksFrom")(function* (
 
 const mergingSnapshot = () =>
   makeSnapshot([makeThread(MERGING_THREAD, { pullRequests: [makeLink(7, { state: "open" })] })]);
+
+/** A thread on branch `feature`, whose pull request is #30. */
+const MERGER_THREAD = ThreadId.make("merger");
+
+const mergerSnapshot = (pullRequests: ReadonlyArray<ThreadPullRequestLink> = []) =>
+  makeSnapshot([
+    makeThread(MERGER_THREAD, {
+      branch: "feature",
+      branchPullRequest: {
+        projectId: PROJECT_ID,
+        repository: "owner/repository",
+        number: 30,
+        url: "https://github.com/owner/repository/pull/30",
+      },
+      pullRequests,
+    }),
+  ]);
+
+/**
+ * The link commands `events` dispatch. Each is a merge or close command that, once it ends,
+ * links what it merged and then reads its thread's links, so those reads mark it handled.
+ */
+const mergeLinksFrom = Effect.fn("mergeLinksFrom")(function* (
+  fixture: Harness,
+  reactor: PullRequestSyncReactor.PullRequestSyncReactor["Service"],
+  events: ReadonlyArray<OrchestrationV2DomainEvent>,
+  reads = events.length,
+) {
+  yield* Queue.offerAll(fixture.domainEvents, events);
+  for (let read = 0; read < reads; read++) yield* Queue.take(fixture.snapshotReads);
+  yield* reactor.drain;
+  return yield* Ref.get(fixture.linkCommands);
+});
 
 describe("PullRequestSyncReactor", () => {
   it.effect("lets a finished sweep's links go while a cache keeps the fiber that read them", () =>
@@ -2365,6 +2425,127 @@ describe("PullRequestSyncReactor", () => {
           [124, 124],
         );
         assert.strictEqual(links[0]!.commandId, links[1]!.commandId);
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+  );
+
+  it.effect.each([
+    {
+      name: "a URL it names",
+      input: "gh pr merge https://github.com/other/project/pull/45 --squash",
+      linked: ["https://github.com/other/project/pull/45"],
+    },
+    {
+      name: "a number, in the thread's project",
+      input: "gh pr merge 44 --squash --delete-branch",
+      linked: ["https://github.com/owner/repository/pull/44"],
+    },
+    {
+      name: "a number set to merge from a Codex shell wrapper",
+      input: '/bin/zsh -lc "cd /workspace/project && gh pr merge 44 --auto --squash"',
+      linked: ["https://github.com/owner/repository/pull/44"],
+    },
+    {
+      name: "a number in the repository it names",
+      input: "gh pr merge 48 --repo other/project",
+      linked: ["https://github.com/other/project/pull/48"],
+    },
+    {
+      name: "a number its output places on another host",
+      input: "glab mr merge 5 --yes",
+      output: "https://gitlab.com/group/project/-/merge_requests/5\n",
+      linked: ["https://gitlab.com/group/project/-/merge_requests/5"],
+    },
+    {
+      name: "the thread's branch, checked out",
+      input: "gh pr merge --squash --delete-branch 2>&1 | tail -3",
+      linked: ["https://github.com/owner/repository/pull/30"],
+    },
+    {
+      name: "the thread's branch, by name",
+      input: "timeout 60 gh pr merge feature --squash",
+      linked: ["https://github.com/owner/repository/pull/30"],
+    },
+    { name: "one the thread already links", input: "gh pr merge 12 --squash", linked: [] },
+    { name: "a close", input: "gh pr close 44", linked: [] },
+    { name: "turning auto-merge off", input: "gh pr merge 44 --disable-auto", linked: [] },
+    {
+      name: "a merge only in quoted text",
+      input: "echo 'gh pr merge 44' && gh pr view 44",
+      linked: [],
+    },
+    {
+      name: "a merge only in heredoc text",
+      input: "cat > notes.md <<'EOF'\ngh pr merge 44\nEOF",
+      linked: [],
+    },
+    { name: "another branch", input: "gh pr merge other-branch --squash", linked: [] },
+    {
+      name: "a branch in another repository",
+      input: "gh pr merge --repo other/project feature",
+      linked: [],
+    },
+    {
+      name: "a URL on another host than its CLI's",
+      input: "gh pr merge https://gitlab.com/group/project/-/merge_requests/5",
+      linked: [],
+    },
+    {
+      name: "a number on another host than the project's",
+      input: "glab mr merge 5 --yes",
+      linked: [],
+    },
+    { name: "a stack merge that names no pull request", input: "gh stack merge", linked: [] },
+  ])("links what a merge command merged: $name", ({ input, output, linked }) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const fixture = yield* makeHarness({
+        snapshot: mergerSnapshot([makeLink(12, { state: "open" })]),
+      });
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* startAndSweep(fixture);
+        const links = yield* mergeLinksFrom(fixture, reactor, [
+          commandRan(MERGER_THREAD, input, output),
+        ]);
+
+        assert.deepStrictEqual(
+          links.map((command) => [command.threadId, command.url, command.source]),
+          linked.map((url) => [MERGER_THREAD, url, "agent"]),
+        );
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+  );
+
+  it.effect("links a merge only once it succeeds, and once per command", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const fixture = yield* makeHarness({ snapshot: mergerSnapshot() });
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* startAndSweep(fixture);
+        const merge = (name: string, ended: Parameters<typeof commandRan>[4], output?: string) =>
+          commandRan(MERGER_THREAD, "gh pr merge 44 --squash", output, name, ended);
+        const links = yield* mergeLinksFrom(
+          fixture,
+          reactor,
+          [
+            merge("failed", { status: "failed" }),
+            merge("refused", { exitCode: 1 }, "X Pull request #44 is not mergeable"),
+            merge("merged", { exitCode: 0 }),
+            // A repeated settlement of the same command.
+            merge("merged", { exitCode: 0 }),
+          ],
+          3,
+        );
+
+        assert.deepStrictEqual(
+          links.map((command) => [command.number, command.source]),
+          [[44, "agent"]],
+        );
+        assert.isTrue(
+          links[0]!.commandId.startsWith("server:pr-merged-link:merger:item:merger:merged:"),
+        );
       }).pipe(Effect.provide(fixture.layer));
     }),
   );

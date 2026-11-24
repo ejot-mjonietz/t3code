@@ -198,6 +198,15 @@ describe("omitIdleSubagentShells", () => {
     ]);
   });
 
+  it("keeps idle children with pull request links for their ancestors' lists", () => {
+    const threads = [
+      row("root", null),
+      row("linked", "root", { pullRequests: [{ source: "created" } as never] }),
+      row("dismissed", "root", { pullRequests: [{ source: "stack-dismissed" } as never] }),
+    ];
+    expect(omitIdleSubagentShells(threads).map((thread) => thread.id)).toEqual(["root", "linked"]);
+  });
+
   it("still filters the transcript events of omitted children for a subscriber that opts in", () => {
     const threads = [row("root", null), row("idle", "root")];
     const omitted = activeShellRowsForSubscriber(threads, true);
@@ -327,6 +336,32 @@ describe("omitOlderSettledShells", () => {
       "side-chat",
     ]);
     expect(result.olderSettled.counts).toEqual([{ projectId: "project-a", count: 5 }]);
+  });
+
+  it("lets a child kept only for its pull request links leave with its older parent", () => {
+    const pullRequests = [{ source: "created" }] as never;
+    const result = omit([
+      ...newest,
+      row("old", 30),
+      row("old-child", null, {
+        lineage: {
+          parentThreadId: ThreadId.make("old"),
+          relationshipToParent: "subagent",
+          rootThreadId: ThreadId.make("old"),
+        },
+        pullRequests,
+      }),
+      row("new-child", null, {
+        lineage: {
+          parentThreadId: ThreadId.make("new-0"),
+          relationshipToParent: "subagent",
+          rootThreadId: ThreadId.make("new-0"),
+        },
+        pullRequests,
+      }),
+    ]);
+    expect(result.threads.map((thread) => thread.id).slice(25)).toEqual(["new-child"]);
+    expect(result.olderSettled.counts).toEqual([{ projectId: "project-a", count: 1 }]);
   });
 });
 

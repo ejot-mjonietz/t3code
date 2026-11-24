@@ -1187,6 +1187,72 @@ describe("source control tools", () => {
     }),
   );
 
+  it.effect("links the PR it merges, and stack layers merged with it, to the thread once", () =>
+    Effect.gen(function* () {
+      const layer = (number: number) => ({
+        number,
+        state: "open" as const,
+        headSha: `sha-${number}`,
+        headBranch: `layer-${number}`,
+      });
+      const merge = (
+        pullRequests: ReadonlyArray<ThreadPullRequestLink>,
+        options: { readonly auto?: boolean; readonly stack?: boolean; readonly fails?: boolean },
+      ) =>
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({
+            thread: { ...branchThread, pullRequests },
+            pullRequests: {
+              stack: () =>
+                Effect.succeed({
+                  id: "stack-1",
+                  number: 7,
+                  url: "https://github.com/t3tools/t3code/stacks/7",
+                  base: "main",
+                  layers: [layer(40), layer(41), layer(42), layer(43)],
+                }),
+              runAction: () =>
+                options.fails === true
+                  ? Effect.fail(
+                      new PullRequestOperationError({ operation: "merge", detail: "Blocked." }),
+                    )
+                  : Effect.undefined,
+              summary: () => Effect.succeed({ state: "merged" } as never),
+            },
+          });
+          yield* harness
+            .call("pull_request_merge", {
+              expectedHeadSha: "sha-42",
+              ...(options.auto === undefined ? {} : { auto: options.auto }),
+              ...(options.stack === undefined ? {} : { stack: options.stack }),
+            })
+            .pipe(Effect.ignore);
+          return (yield* Ref.get(harness.commands)).map((command) =>
+            command.type === "thread.pull-request.link"
+              ? [command.threadId, command.number, command.source, command.url]
+              : [command.type],
+          );
+        });
+      const linked = (number: number) => [
+        THREAD_ID,
+        number,
+        "agent",
+        `https://github.com/t3tools/t3code/pull/${number}`,
+      ];
+
+      expect(yield* merge([], {})).toEqual([linked(42)]);
+      // Turning on auto-merge counts: the agent asked the host to merge it.
+      expect(yield* merge([], { auto: true })).toEqual([linked(42)]);
+      expect(yield* merge([makeLink(42, { source: "created" })], {})).toEqual([]);
+      expect(yield* merge([], { fails: true })).toEqual([]);
+      // The layers below merge too; the user's dismissal of one holds, and the layer above stays.
+      expect(yield* merge([makeLink(40, { source: "stack-dismissed" })], { stack: true })).toEqual([
+        linked(42),
+        linked(41),
+      ]);
+    }),
+  );
+
   it.effect("re-running checks reopens a watch that saw its checks finish", () =>
     Effect.gen(function* () {
       const watch = {
