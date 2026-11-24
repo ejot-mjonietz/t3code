@@ -1570,6 +1570,8 @@ export const OrchestrationV2UserInputQuestion = Schema.Struct({
       description: TrimmedNonEmptyString,
       value: Schema.optional(Schema.String),
       preview: Schema.optional(Schema.String),
+      /** The provider's default or recommended choice; clients start with it selected. */
+      selected: Schema.optional(Schema.Boolean),
     }),
   ),
   multiSelect: Schema.optional(Schema.Boolean),

@@ -216,10 +216,10 @@ describe("announcing resolved thread requests", () => {
 
 describe("initial user input drafts", () => {
   const questions = [
-    { id: "editor", initialAnswer: "  Proposed commit\n\n" },
-    { id: "empty", initialAnswer: "" },
-    { id: "ordinary" },
-    { id: "choices", initialAnswer: "Ignore this", allowCustomAnswer: false },
+    { id: "editor", initialAnswer: "  Proposed commit\n\n", options: [] },
+    { id: "empty", initialAnswer: "", options: [] },
+    { id: "ordinary", options: [] },
+    { id: "choices", initialAnswer: "Ignore this", allowCustomAnswer: false, options: [] },
   ];
 
   it("seeds editable answers and preserves edits and selections on later snapshots", () => {
@@ -245,8 +245,8 @@ describe("initial user input drafts", () => {
   it("seeds a question with the id __proto__ as its own draft", () => {
     const seeded = seedUserInputDraftAnswers(
       [
-        { id: "__proto__", initialAnswer: "Proposed" },
-        { id: "name", initialAnswer: "Control" },
+        { id: "__proto__", initialAnswer: "Proposed", options: [] },
+        { id: "name", initialAnswer: "Control", options: [] },
       ],
       {},
     );
@@ -254,6 +254,36 @@ describe("initial user input drafts", () => {
     expect(JSON.stringify(seeded)).toBe(
       '{"__proto__":{"customAnswer":"Proposed"},"name":{"customAnswer":"Control"}}',
     );
+  });
+
+  it("starts untouched questions with the provider's default options", () => {
+    const defaults = [
+      {
+        id: "single",
+        options: [
+          { label: "Keep" },
+          { label: "Retry", selected: true },
+          { label: "Abort", selected: true },
+        ],
+      },
+      {
+        id: "multi",
+        multiSelect: true,
+        options: [
+          { label: "Server", selected: true },
+          { label: "Web" },
+          { label: "Mobile", value: "native", selected: true },
+        ],
+      },
+      { id: "none", options: [{ label: "Keep" }] },
+    ];
+
+    expect(seedUserInputDraftAnswers(defaults, {})).toEqual({
+      single: { selectedOptionValues: ["Retry"] },
+      multi: { selectedOptionValues: ["Server", "native"] },
+    });
+    const touched = { single: { customAnswer: "" }, multi: { customAnswer: "Docs" } };
+    expect(seedUserInputDraftAnswers(defaults, touched)).toBe(touched);
   });
 });
 const projection: OrchestrationV2ThreadProjection = {

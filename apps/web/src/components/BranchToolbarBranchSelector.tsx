@@ -725,11 +725,13 @@ export function BranchToolbarBranchSelector({
   });
   const {
     badge: prBadge,
+    pullRequests: prLinks,
+    descendants: prDescendants,
     number: prNumber,
     url: prUrl,
     status: prStatus,
   } = useThreadDisplayedPullRequest(
-    environmentId,
+    threadRef,
     serverThread,
     branchPr,
     branchStatusQuery.data?.sourceControlProvider,
@@ -872,7 +874,8 @@ export function BranchToolbarBranchSelector({
           <ThreadPullRequestBadgeControl
             render={<ComposerControl size="xs" />}
             badge={prBadge}
-            pullRequests={serverThread?.pullRequests ?? []}
+            pullRequests={prLinks}
+            descendants={prDescendants}
             number={prNumber}
             url={prUrl}
             status={prStatus}

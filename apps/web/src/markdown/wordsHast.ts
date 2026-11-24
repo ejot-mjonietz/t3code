@@ -7,6 +7,7 @@ import {
 import wordsWasm from "@pierre/words/wasm";
 import { decodeHTML, decodeHTMLAttribute } from "entities";
 import { find, html as htmlSchema, svg as svgSchema } from "property-information";
+import type { ServerProviderPromptKeyword } from "@t3tools/contracts";
 import { resolveCodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import { resolveCodexFileCitationLink } from "@t3tools/shared/codexFileCitations";
 import type { ReferenceAutolink } from "@t3tools/client-runtime/source-control-clients";
@@ -23,6 +24,7 @@ import {
 import { rehypeChipPunctuation } from "../components/chat/markdownChipPunctuation";
 import { rehypeHeadingIds } from "../components/chat/markdownFragments";
 import { rehypeTextDirection } from "../components/chat/markdownTextDirection";
+import { paintPromptKeywords } from "./promptKeywordsHast";
 
 /** What a kind of message adds to chat Markdown. Pass a stable object: renderers cache by it. */
 export interface MarkdownExtensions {
@@ -44,6 +46,8 @@ export interface MarkdownExtensions {
   };
   /** Expand GitHub `:alias:` emoji shortcodes in prose outside code. */
   readonly githubEmoji?: boolean;
+  /** The provider's prompt keywords glow where the prose shows them, as the provider reads them. */
+  readonly promptKeywords?: ReadonlyArray<ServerProviderPromptKeyword>;
 }
 
 export interface WordsHastOptions {
@@ -1148,6 +1152,7 @@ export function wordsHast(text: string, options: WordsHastOptions): Root {
   addHeadingIds(hast);
   addTextDirection(hast as never);
   groupChipPunctuation(hast as never);
+  if (extensions.promptKeywords) paintPromptKeywords(hast, text, extensions.promptKeywords);
   return hast;
 }
 

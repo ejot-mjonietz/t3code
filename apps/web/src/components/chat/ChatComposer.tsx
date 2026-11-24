@@ -3936,6 +3936,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     buildContextClipboardFragment={buildContextClipboardFragmentStable}
                     importContextFragment={importContextFragmentStable}
                     skills={selectedProviderSkills}
+                    // An answer to a pending question is not a prompt, so its keywords do nothing.
+                    promptKeywords={
+                      activePendingProgress ? undefined : selectedProviderStatus?.promptKeywords
+                    }
                     className={cn(showMobilePendingAnswerActions && "max-sm:pb-12")}
                     onChange={onPromptChangeStable}
                     onCommandKeyDown={onComposerCommandKeyStable}
@@ -3955,9 +3959,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             ? gt("Choose an option above")
                             : activePendingProgress.activeQuestion?.options.length === 0
                               ? gt("Type your answer")
-                              : gt(
-                                  "Type your own answer, or leave this blank to use the selected option",
-                                )
+                              : activePendingProgress.activeQuestion?.multiSelect
+                                ? gt(
+                                    "Add your own answer to the selected options, or leave this blank",
+                                  )
+                                : gt(
+                                    "Type your own answer, or leave this blank to use the selected option",
+                                  )
                           : projectSelectionRequired
                             ? gt("Choose a project above to start a thread")
                             : showProviderUnavailable

@@ -19,6 +19,7 @@ import {
   OrchestrationV2ThreadShell as ThreadShellSchema,
 } from "@t3tools/contracts";
 import { turnItemCanChangeUserWait } from "@t3tools/shared/agentAwareness";
+import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - a synchronous digest of a few project rows.
 import * as NodeCrypto from "node:crypto";
@@ -248,6 +249,26 @@ function hiddenChildAncestorIds(
   return ancestorIds;
 }
 
+/**
+ * Why a shell that omits idle subagent children keeps this one: it is live or holds a nested chain
+ * or a linked environment's task ("held"), or its ancestors list its pull request links ("links").
+ * Null for a child the shell leaves out and for a thread that is no subagent child.
+ */
+function subagentShellKeep(
+  thread: OrchestrationV2ThreadShell,
+  facts: Pick<ShellTrimFacts, "subagentParentIds" | "remoteTaskParentIds">,
+): "held" | "links" | null {
+  if (thread.lineage.relationshipToParent !== "subagent") return null;
+  if (
+    isLiveSubagentShell(thread) ||
+    facts.subagentParentIds.has(thread.id) ||
+    facts.remoteTaskParentIds.has(thread.id)
+  ) {
+    return "held";
+  }
+  return visibleThreadPullRequests(thread.pullRequests ?? []).length > 0 ? "links" : null;
+}
+
 function omitIdleSubagentShellsWith(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
   facts: Pick<ShellTrimFacts, "subagentParentIds" | "remoteTaskParentIds">,
@@ -255,9 +276,7 @@ function omitIdleSubagentShellsWith(
   return threads.filter(
     (thread) =>
       thread.lineage.relationshipToParent !== "subagent" ||
-      isLiveSubagentShell(thread) ||
-      facts.subagentParentIds.has(thread.id) ||
-      facts.remoteTaskParentIds.has(thread.id),
+      subagentShellKeep(thread, facts) !== null,
   );
 }
 
@@ -269,7 +288,7 @@ function omitOlderSettledShellsWith(
   },
   facts: Pick<
     ShellTrimFacts,
-    "olderSettledBeforeMs" | "olderSettledCounts" | "remoteTaskParentIds"
+    "olderSettledBeforeMs" | "olderSettledCounts" | "subagentParentIds" | "remoteTaskParentIds"
   >,
 ): {
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
@@ -277,8 +296,17 @@ function omitOlderSettledShellsWith(
 } {
   const nowMs = DateTime.toEpochMillis(input.now);
   const beforeMs = facts.olderSettledBeforeMs ?? nowMs;
-  const ancestorIds = hiddenChildAncestorIds(input.threads);
-  const threads = input.threads.filter(
+  // A child kept only for its links leaves with its parent, so it never holds an older thread.
+  const linkedIds = new Set<ThreadId>();
+  for (const thread of input.threads) {
+    if (subagentShellKeep(thread, facts) === "links") linkedIds.add(thread.id);
+  }
+  const ancestorIds = hiddenChildAncestorIds(
+    linkedIds.size === 0
+      ? input.threads
+      : input.threads.filter((thread) => !linkedIds.has(thread.id)),
+  );
+  const kept = input.threads.filter(
     (thread) =>
       !isOlderSettledThreadShell(thread, beforeMs) ||
       thread.pinnedAt != null ||
@@ -287,6 +315,15 @@ function omitOlderSettledShellsWith(
       ancestorIds.has(thread.id) ||
       facts.remoteTaskParentIds.has(thread.id),
   );
+  const keptIds = linkedIds.size === 0 ? null : new Set(kept.map((thread) => thread.id));
+  const threads =
+    keptIds === null
+      ? kept
+      : kept.filter(
+          (thread) =>
+            !linkedIds.has(thread.id) ||
+            (thread.lineage.parentThreadId !== null && keptIds.has(thread.lineage.parentThreadId)),
+        );
   return {
     threads,
     olderSettled: {
@@ -298,10 +335,9 @@ function omitOlderSettledShellsWith(
 }
 
 /**
- * Idle subagent children have no sidebar row, so clients that opt in read them from their thread
- * family instead. A child stays while it is live or the parent of another child, so the request
- * and working walks over shell rows never meet a gap in a nested chain. It also stays as the
- * parent of a task in a linked environment, whose clients nest that task under it.
+ * Idle subagent children have no sidebar row; opted-in clients read them from their thread family.
+ * A child stays while live, while it parents another child or a linked environment's task (so walks
+ * over shell rows never meet a gap), and while it has pull request links its ancestors show.
  */
 export function omitIdleSubagentShells(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
@@ -328,10 +364,9 @@ export function activeShellRowsForSubscriber(
 }
 
 /**
- * Opted-in snapshots keep the 25 newest settled top-level threads (and ties) and count the rest per
- * project in `olderSettled`; clients page them with `getOlderSettledThreads`. Older rows stay while
- * pinned, snoozed, live, above a kept subagent or side chat, or the parent of a task in a linked
- * environment, so walks over shell rows and other environments' tasks still find them.
+ * Opted-in snapshots keep the 25 newest settled top-level threads (and ties), counting the rest per
+ * project in `olderSettled` for `getOlderSettledThreads`. Older rows stay while pinned, snoozed, live,
+ * above a kept child, or parenting a linked task; a child kept only for its PR links holds none.
  */
 export function omitOlderSettledShells(input: {
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
@@ -388,9 +423,11 @@ function shellSubscriberThreadIds(
   ]);
   const keptSubagentIds = new Set(subagents.map((entry) => entry.id));
   const beforeMs = facts.olderSettledBeforeMs;
+  // Children with pull request links are read too, without holding their ancestors: the trims
+  // keep the ones whose parent stays.
   return index.flatMap((entry) =>
     entry.lineage.relationshipToParent === "subagent"
-      ? keptSubagentIds.has(entry.id)
+      ? keptSubagentIds.has(entry.id) || entry.hasPullRequests === true
         ? [entry.id]
         : []
       : !options.omitOlderSettled ||

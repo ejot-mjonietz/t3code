@@ -6,6 +6,7 @@ import {
   ThreadId,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadShell,
+  type ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
@@ -19,7 +20,9 @@ import { isThreadWorking } from "./threadInbox.ts";
 import {
   childThreadInputsTitle,
   createEnvironmentThreadShellAtoms,
+  descendantPullRequestsByThread,
   resolveListedAncestorThreadRef,
+  rollUpThreadPullRequests,
 } from "./threadShell.ts";
 
 const environmentId = EnvironmentId.make("environment-v2");
@@ -778,5 +781,130 @@ describe("resolveListedAncestorThreadRef", () => {
     expect(rowOf(task.id, environmentId, [parent, task])).toEqual(
       ref(remoteEnvironmentId, parent.id),
     );
+  });
+});
+
+describe("descendant pull requests", () => {
+  const link = (
+    number: number,
+    overrides: Partial<ThreadPullRequestLink> = {},
+  ): ThreadPullRequestLink => ({
+    host: "github.com",
+    repository: "acme/app",
+    number,
+    url: `https://github.com/acme/app/pull/${number}`,
+    source: "created",
+    linkedAt: "2026-11-01T00:00:00.000Z",
+    snapshot: null,
+    stack: null,
+    ...overrides,
+  });
+  const thread = (
+    id: string,
+    parent: { readonly id: ThreadId; readonly kind: "subagent" | "fork" } | null,
+    pullRequests: ReadonlyArray<ThreadPullRequestLink>,
+    overrides: Partial<OrchestrationV2ThreadShell> = {},
+  ): OrchestrationV2ThreadShell => ({
+    ...v2ThreadShell,
+    id: ThreadId.make(id),
+    title: id,
+    lineage: {
+      rootThreadId: v2ThreadShell.id,
+      parentThreadId: parent?.id ?? null,
+      relationshipToParent: parent?.kind ?? null,
+    },
+    pullRequests,
+    ...overrides,
+  });
+  const numbersOf = (entries: ReadonlyArray<{ readonly link: ThreadPullRequestLink }> = []) =>
+    entries.map((entry) => entry.link.number);
+
+  it("rolls subagent links up to every ancestor once, from the nearest subagent", () => {
+    const root = thread(v2ThreadShell.id, null, []);
+    const child = thread("child", { id: root.id, kind: "subagent" }, [link(1), link(2)], {
+      title: "Subagent: Fix tests",
+    });
+    // Same pull request as the child's #1 under another spelling of the repository.
+    const grandchild = thread("grandchild", { id: child.id, kind: "subagent" }, [
+      link(1, { repository: "Acme/App", url: "https://github.com/Acme/App/pull/1" }),
+      link(3),
+    ]);
+    const sibling = thread(
+      "sibling",
+      { id: root.id, kind: "subagent" },
+      [link(3), link(4, { source: "stack-dismissed" })],
+      { createdAt: DateTime.add(v2Now, { seconds: 1 }) },
+    );
+    const fork = thread("fork", { id: root.id, kind: "fork" }, [link(5)]);
+
+    const byThread = descendantPullRequestsByThread([root, grandchild, sibling, child, fork]);
+
+    const rootEntries = byThread.get(root.id);
+    expect(numbersOf(rootEntries)).toEqual([1, 2, 3]);
+    expect(rootEntries?.map((entry) => [entry.threadId, entry.depth])).toEqual([
+      [child.id, 1],
+      [child.id, 1],
+      // The sibling is nearer than the grandchild, which links #3 too.
+      [sibling.id, 1],
+    ]);
+    expect(rootEntries?.[0]?.threadTitle).toBe("Fix tests");
+    expect(numbersOf(byThread.get(child.id))).toEqual([1, 3]);
+    expect(byThread.get(grandchild.id)).toBeUndefined();
+    expect(byThread.has(fork.id)).toBe(false);
+  });
+
+  it("stops at a subagent cycle and returns one empty map without subagent links", () => {
+    const loopA = thread("loop-a", { id: ThreadId.make("loop-b"), kind: "subagent" }, [link(1)]);
+    const loopB = thread("loop-b", { id: loopA.id, kind: "subagent" }, []);
+    expect(numbersOf(descendantPullRequestsByThread([loopA, loopB]).get(loopB.id))).toEqual([1]);
+
+    const linkless = [thread("root", null, [link(1)]), thread("plain", null, [])];
+    expect(descendantPullRequestsByThread(linkless)).toBe(
+      descendantPullRequestsByThread([thread("other", null, [])]),
+    );
+  });
+
+  it("keeps a thread's own link, a dismissed one too, over a descendant's", () => {
+    const own = [link(1, { source: "manual" }), link(4, { source: "stack-dismissed" })];
+    const descendants = [link(1), link(2), link(4)].map((entry) => ({
+      link: entry,
+      threadId: ThreadId.make("child"),
+      threadTitle: "Child",
+      depth: 1,
+    }));
+
+    const rollup = rollUpThreadPullRequests(own, descendants);
+    expect(rollup.pullRequests).toEqual([own[0], own[1], descendants[1]!.link]);
+    expect(rollup.descendants).toEqual([descendants[1]]);
+
+    expect(rollUpThreadPullRequests(own, []).pullRequests).toBe(own);
+    const covered = rollUpThreadPullRequests(own, [descendants[0]!, descendants[2]!]);
+    expect(covered.pullRequests).toBe(own);
+    expect(covered.descendants).toEqual([]);
+  });
+
+  it("keeps a thread's descendant links while a subagent streams", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const root = thread(v2ThreadShell.id, null, []);
+    const child = thread("child", { id: root.id, kind: "subagent" }, [link(1)]);
+    const setThreads = (rows: ReadonlyArray<OrchestrationV2ThreadShell>) =>
+      registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: rows });
+    setThreads([root, child]);
+    const atom = threads.descendantPullRequestsAtom({ environmentId, threadId: root.id });
+    const dispose = registry.mount(atom);
+    try {
+      const first = registry.get(atom);
+      expect(numbersOf(first)).toEqual([1]);
+      // A streaming update decodes equal links again.
+      setThreads([root, { ...child, itemCount: 3, pullRequests: [link(1)] }]);
+      expect(registry.get(atom)).toBe(first);
+
+      setThreads([root, { ...child, pullRequests: [link(1, { source: "agent" })] }]);
+      expect(registry.get(atom)).not.toBe(first);
+      expect(registry.get(atom)[0]?.link.source).toBe("agent");
+    } finally {
+      dispose();
+      registry.dispose();
+    }
   });
 });

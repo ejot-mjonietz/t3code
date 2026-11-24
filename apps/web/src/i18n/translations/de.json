@@ -71,6 +71,7 @@
   "cd03eb1b84271c02": "Agent",
   "bfe1a60f3f9c60fb": "Runde {turn} · {what}",
   "dfdaa6255a416140": "Übersicht über {turns, plural, one {{turns} letzte Runde} other {{turns} letzte Runden}}, {textTurns, plural, =0 {ohne Nachrichtentext} one {mit dem Nachrichtentext der letzten Runde} other {mit den Nachrichtentexten der letzten {textTurns} Runden}}{truncated, select, yes {, passend gekürzt} other {}}",
+  "260c6b45f52d2f27": "Fügt den Text deiner Nachrichten und der Antworten des Agenten aus {textTurns, plural, one {der letzten Runde} other {den letzten {textTurns} Runden}} hinzu.",
   "afac52a5cc2dc801": "Deine Antwort konnte nicht gesendet werden. Versuche es erneut.",
   "79d776428f4d0650": "Die Datei konnte nicht geladen werden. Verbinde dich erneut und versuch es noch einmal.",
   "3ea34cbb1ca5ba9b": "Vorschau abgebrochen.",
@@ -2651,6 +2652,7 @@
   "55f4078f7fe8e597": "{term, select, mr {MR #{number}, Status ausstehend} cr {Änderungsanfrage #{number}, Status ausstehend} other {PR #{number}, Status ausstehend}}",
   "3260b22f72f7effb": "{tooltipLead}: {title}",
   "feac8e54b30c5a03": "Terminal-Prozess läuft",
+  "120862ef9192b6e3": "From subagent {title}",
   "fc2c9a91f498ad6b": "{count, plural, one {{count} Terminal-Prozess läuft. Terminal öffnen} other {{count} Terminal-Prozesse laufen. Terminal öffnen}}",
   "56f37ff8ca568059": "Stack",
   "6831e9a46cbd8939": "Kette",
@@ -2734,9 +2736,9 @@
   "db7b3a938c45e56c": "Update {version} bereit zum Download",
   "9a951140b69ba740": "Update wird heruntergeladen ({percent} %)",
   "7fdece033260e9fb": "Update wird heruntergeladen",
+  "52e1d4a487c0cf4b": "Installation von {version} fehlgeschlagen. Klicke, um es erneut zu versuchen.",
   "09ef51903e99e876": "Update heruntergeladen. Klicke zum Neustarten und Installieren.",
   "d62631cab06d2b80": "Update {version} heruntergeladen. Klicke zum Neustarten und Installieren.",
-  "52e1d4a487c0cf4b": "Installation von {version} fehlgeschlagen. Klicke, um es erneut zu versuchen.",
   "78a04e0e625c0990": "Update fehlgeschlagen",
   "c24de5eb69373a55": "Dieser {build}-Build ignoriert {track}-Releases. Prüfe den Update-Kanal in den Einstellungen, um den Wechsel abzuschließen.",
   "b02ae45a6109c93b": "Auf dem neuesten Stand",
@@ -3366,6 +3368,7 @@
   "880aa376639f0b04": "Sende eine Nachricht, um abzulehnen und den Agenten umzulenken",
   "d9c81b6a6bad8058": "Wähle oben eine Option",
   "9a3db19d3e12dea6": "Gib deine Antwort ein",
+  "f3a50d9754041f5a": "Add your own answer to the selected options, or leave this blank",
   "ea8fec0f7052e43e": "Gib deine eigene Antwort ein oder lass das Feld leer, um die ausgewählte Option zu verwenden",
   "56d9080d3ab28e39": "Wähle oben ein Projekt, um einen Thread zu starten",
   "6d66186eedd8009b": "Aktiviere einen Anbieter in den Einstellungen, um eine Nachricht zu senden",
@@ -3639,7 +3642,6 @@
   "4e0710d19dfc2e7e": "Diesen Bericht an das T3-Team senden?",
   "87d0ae0723ba75d1": "Das ist alles, was deinen Rechner verlässt. Erst wenn du auf Senden klickst, wird etwas gesendet.",
   "bf19826f81484328": "Unterhaltung mitsenden",
-  "260c6b45f52d2f27": "Fügt den Text deiner Nachrichten und der Antworten des Agenten aus {textTurns, plural, one {der letzten Runde} other {den letzten {textTurns} Runden}} hinzu.",
   "ddb7e6f8ce99e657": "Nur wer auf diesem Rechner Agenten ausführen kann, kann den Bericht senden oder ablehnen.",
   "03c1eb603c112f47": "Nicht senden",
   "653405e4ed498d9f": "Senden",
@@ -7227,6 +7229,7 @@
   "1e64c95da299ca6c": "Beobachtet",
   "b07208f457872b13": "{host}-Stack aus {size}: Das Mergen einer Ebene übernimmt die darunterliegenden.",
   "5f88c49c7f942c61": "{terms, select, mr {{size} Merge Requests, über den Basis-Branch verkettet.} cr {{size} Änderungsanfragen, über den Basis-Branch verkettet.} other {{size} Pull Requests, über den Basis-Branch verkettet.}}",
+  "d81b54a0b2059ecd": "Open subagent {title}",
   "00b98c592346a2b2": "Aktionen für #{number}",
   "ed09d936d8ba9792": "Beobachtung beenden",
   "af6adbd67cef13b1": "Auf Änderungen beobachten",
@@ -7235,6 +7238,7 @@
   "ff700a2d719110d8": "Die Umgebung des Threads ist nicht verfügbar.",
   "b935e8d2dad4d8ba": "Verknüpfte Issues",
   "e18c90152452a50e": "{openCount, plural, one {{openCount} offen} other {{openCount} offen}} · {linkCount, plural, one {{linkCount} verknüpft} other {{linkCount} verknüpft}}",
+  "20765ea8de9aa131": "{count, plural, one {{count} from a subagent} other {{count} from subagents}}",
   "106c1bf3308a8c33": "Beobachtet: Der Agent wird geweckt, wenn Checks fertig sind, jemand kommentiert oder der Branch Konflikte hat",
   "15a560968264b0ed": "Öffnen",
   "a4e0e1e0bad3dcd8": "Keine verknüpften Pull Requests",
@@ -8756,9 +8760,13 @@
   "ed83b25c71c98a20": "Wähle für jedes Projekt ein oder mehrere {scope}s in {tracker}. Ihre Issues erscheinen neben denen des Repositorys, und Agenten legen neue Issues im ersten an, sofern kein anderes verlangt wird.",
   "19c2d5e81ff8f89a": "{tracker} {scope} für {project}",
   "68e061510b765772": "Nicht zugeordnet",
+  "99d51127f573296b": "Weiteres Konto",
+  "8ec2c57414669b79": "Verbinde einen zweiten {tracker}-Workspace oder -Nutzer.",
+  "99963c0142e17f00": "Für das neue {tracker}-Konto.",
   "a2d95d39d3398bda": "Anmeldedaten abgelehnt",
   "9eae463720500113": "Auf dem Server gespeichert.",
   "b6e27ab2537ef874": "Erstellen",
+  "6d8e4ebc889bace9": "Konto hinzufügen",
   "13ef526271b0f5d4": "Alle Bedingungen löschen",
   "d1938a629f039515": "Bedingung entfernen",
   "84a605b241ce65b7": "Gruppe und ihre Bedingungen entfernen",
@@ -12605,6 +12613,16 @@
   "156ff7b625287a1e": "Übersprungene ausblenden",
   "69b985b97ab45e6b": "{count} übersprungene anzeigen",
   "2400254d362de84d": "Workflow-Ausführungen werden geladen…",
+  "cae5c3205c01d062": [
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Eine Workflow-Datei hat ein Problem."
+    },
+    " ",
+    "Die letzte funktionierende Version läuft weiter."
+  ],
+  "ed8ce6ebc73dc12d": "Datei öffnen",
   "145e1f7503ba3b2c": [
     "Diese Umgebung hat keinen Lauf mit diesem Link.",
     " ",
@@ -12630,16 +12648,6 @@
       "c": "Anleitung lesen"
     }
   ],
-  "cae5c3205c01d062": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Eine Workflow-Datei hat ein Problem."
-    },
-    " ",
-    "Die letzte funktionierende Version läuft weiter."
-  ],
-  "ed8ce6ebc73dc12d": "Datei öffnen",
   "5d8d278ff828102d": "Alle Workflows",
   "39459da07479f482": "Agent",
   "7741243632056b81": "{step} · Transkript",
@@ -12782,9 +12790,5 @@
   "27d76249d09eb69f": "Review-Leitfaden bereit",
   "faa3bb26abb39c93": "Review-Leitfaden fehlgeschlagen",
   "b7df38b7d8792d78": "Leitfaden öffnen",
-  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden",
-  "99d51127f573296b": "Weiteres Konto",
-  "8ec2c57414669b79": "Verbinde einen zweiten {tracker}-Workspace oder -Nutzer.",
-  "99963c0142e17f00": "Für das neue {tracker}-Konto.",
-  "6d8e4ebc889bace9": "Konto hinzufügen"
+  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden"
 }

@@ -200,9 +200,10 @@ export function AddProviderInstanceDialog({
   const [isSaving, setIsSaving] = useState(false);
   const [createdInstanceId, setCreatedInstanceId] = useState<ProviderInstanceId | null>(null);
 
-  // Reserve Codex/Claude default ids because they run before configuration; other unconfigured slots are
-  // available.
+  // Reserve omp/Codex/Claude default ids because they run before configuration; other unconfigured
+  // slots are available.
   const existingIds = new Set([
+    "omp",
     "codex",
     "claudeAgent",
     ...Object.keys(settings.providerInstances ?? {}),

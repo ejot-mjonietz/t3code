@@ -303,6 +303,10 @@
       "types": "./src/promptLinks.ts",
       "import": "./src/promptLinks.ts"
     },
+    "./promptKeywords": {
+      "types": "./src/promptKeywords.ts",
+      "import": "./src/promptKeywords.ts"
+    },
     "./threadLinks": {
       "types": "./src/threadLinks.ts",
       "import": "./src/threadLinks.ts"

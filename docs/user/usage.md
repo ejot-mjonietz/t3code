@@ -8,7 +8,7 @@ On mobile, choose **Usage** in the workspace navigation.
 
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Muse Code, and Cursor history
+**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Oh My Pi, Muse Code, and Cursor history
 from your connected environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
 cost, split by token type and by speed. These estimates are not your subscription bill.
 **Premium** is what Fast and Ultrafast requests cost above standard rates. Cost that cannot be
@@ -42,6 +42,13 @@ variable. Pi reads `~/.pi/agent/sessions`, or the `sessions` directory under
 `PI_CODING_AGENT_DIR`. Set `PI_CODING_AGENT_SESSION_DIR` to read a different session directory.
 To include sessions saved through `--session-dir` or Pi's `sessionDir` setting, set this environment
 variable to the same directory. Pi includes recorded tool and summary costs under `Tools/summaries`.
+Oh My Pi reads `~/.omp/agent/sessions` with its subagent transcripts, following omp's own lookup:
+`OMP_PROFILE` or `PI_PROFILE`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_CONFIG_DIR`,
+and `$XDG_DATA_HOME/omp` after `omp config init-xdg`. A `--profile` or absolute `--session-dir` in
+the account's launch arguments adds that directory. Pi reads the same `PI_CODING_AGENT_DIR` and
+`PI_CODING_AGENT_SESSION_DIR` variables, so history they place in Pi's directory counts under Pi.
+Subagent usage counts toward the session that started it, side calls such as titles and captions
+count under their own model, and costs are the ones omp recorded for each call.
 Muse Code reads native session history, including child sessions, from the home reported by the
 configured Muse CLI. Its environment settings, including `XDG_DATA_HOME`, apply. Models without
 known prices still contribute tokens and appear as unpriced; set custom prices to estimate their cost.

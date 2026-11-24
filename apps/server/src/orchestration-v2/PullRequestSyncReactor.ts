@@ -1,8 +1,10 @@
 import {
   CommandId,
   isOrchestrationV2WorkActive,
+  type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
   type PullRequestSummary,
+  type SourceControlProviderKind,
   type ThreadId,
   type ThreadPullRequestKey,
   type ThreadPullRequestLink,
@@ -11,10 +13,12 @@ import {
 } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import { commandIndicatesFailure } from "@t3tools/shared/toolOutput";
 import {
   threadPullRequestKeyOf,
   normalizeThreadPullRequestKey,
   threadPullRequestKeysEqual,
+  threadPullRequestsOf,
   visibleThreadPullRequests,
 } from "../sourceControl/threadPullRequests.ts";
 import {
@@ -28,6 +32,7 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
@@ -37,6 +42,7 @@ import * as Stream from "effect/Stream";
 import * as GitManager from "../git/GitManager.ts";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import { resolveTarget } from "../pullRequest/pullRequestTarget.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -181,6 +187,163 @@ export function changeRequestsCreatedBy(input: string, output: string) {
     created.set(threadPullRequestKeyOf(key), { ...key, url });
   }
   return created.size > creates ? [] : [...created.values()];
+}
+
+// Hosts' merge-or-close commands where a shell starts a command; the group is the command from
+// its CLI's name. Ending in `close`, or Azure's `abandoned`, it ends one unmerged.
+const MERGE_COMMANDS = sourceControlDefinitions.definitions.flatMap(
+  ({ kind, changeRequestCloseCommand: command }) =>
+    command === undefined
+      ? []
+      : [{ kind, run: new RegExp(`${COMMAND_START}(${command.source})(?=$|[\\s;&|)])`, "gu") }],
+);
+const CLOSES_UNMERGED = /(?:close|abandoned)$/u;
+// `12`, `#12`, `!12`, or Azure's `--id=12`.
+const NAMED_NUMBER = /^(?:--id=)?[#!]?([1-9]\d*)$/u;
+const REPOSITORY_OPTION = /^(?:--repo(?:=|$)|-R)(.*)$/su;
+// gh's `--repo HOST/OWNER/REPO`: a host has a dot where an owner has none.
+const HOST_PREFIXED_REPOSITORY = /^([^/]*\.[^/]*)\/([^/]+\/.+)$/u;
+const REDIRECTION = /^\d*(?:[<>]|&>)/u;
+// A redirection whose target is the next word.
+const BARE_REDIRECTION = /^\d*(?:[<>]{1,2}|&>{1,2})$/u;
+
+/** A change request a merge command names: by URL, by number, or by branch (null: checked out). */
+type MergedChangeRequest =
+  | (ThreadPullRequestKey & { readonly by: "url"; readonly url: string })
+  | {
+      readonly by: "number";
+      readonly kind: SourceControlProviderKind;
+      readonly number: number;
+      /** From the command's `--repo`; null for the thread's project. */
+      readonly host: string | null;
+      readonly repository: string | null;
+    }
+  | {
+      readonly by: "branch";
+      readonly kind: SourceControlProviderKind;
+      readonly branch: string | null;
+    };
+
+/** A command's words with their quotes removed, up to a `)` that ends its subshell. */
+function shellWords(command: string): ReadonlyArray<string> {
+  const words: Array<string> = [];
+  let word: string | null = null;
+  let quote: string | null = null;
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index] ?? "";
+    if (quote === null && (char === ")" || /\s/u.test(char))) {
+      if (word !== null) words.push(word);
+      word = null;
+      if (char === ")") break;
+    } else if (quote === null && (char === "'" || char === '"')) {
+      quote = char;
+      word ??= "";
+    } else if (char === quote) {
+      quote = null;
+    } else {
+      word = (word ?? "") + (char === "\\" && quote !== "'" ? (command[++index] ?? "") : char);
+    }
+  }
+  if (word !== null) words.push(word);
+  return words;
+}
+
+/** What one merge command names, read from its words; null when T3 cannot place it. */
+function mergedBy(
+  kind: SourceControlProviderKind,
+  command: string,
+  words: ReadonlyArray<string>,
+): MergedChangeRequest | null {
+  const commandWords = command.split(/\s+/u).length;
+  let named: string | null = null;
+  let branch: string | null = null;
+  let repository: string | null = null;
+  for (let index = 0; index < words.length; index++) {
+    const word = words[index] ?? "";
+    // gh's `--disable-auto` turns a pending merge off.
+    if (word === "--disable-auto") return null;
+    const repositoryOption = REPOSITORY_OPTION.exec(word);
+    if (repositoryOption !== null) {
+      repository = repositoryOption[1] || (words[++index] ?? "");
+    } else if (REDIRECTION.test(word)) {
+      if (BARE_REDIRECTION.test(word)) index++;
+    } else if (
+      // Every host's merge takes one change request, so a later one is option text.
+      named === null &&
+      (NAMED_NUMBER.test(word) || sourceControlDefinitions.parseChangeRequestUrl(word) !== null)
+    ) {
+      named = word;
+    } else if (branch === null && index >= commandWords && !word.startsWith("-")) {
+      branch = word;
+    }
+  }
+  if (named !== null) {
+    const parsed = sourceControlDefinitions.parseChangeRequestUrl(named);
+    if (parsed !== null) {
+      return parsed.definition.kind === kind
+        ? { by: "url", ...normalizeThreadPullRequestKey(parsed.link), url: named }
+        : null;
+    }
+    const number = Number(NAMED_NUMBER.exec(named)?.[1]);
+    if (!Number.isSafeInteger(number)) return null;
+    if (repository === null) return { by: "number", kind, number, host: null, repository: null };
+    // A remote's URL, which GitLab's CLI also takes, is no repository path.
+    if (/[:@]/u.test(repository)) return null;
+    const [, host, path] = HOST_PREFIXED_REPOSITORY.exec(repository) ?? [];
+    return { by: "number", kind, number, host: host ?? null, repository: path ?? repository };
+  }
+  // A stack merge names no one change request, and a command whose pattern runs into its
+  // options, as Azure's does, names one only there.
+  if (repository !== null || /\s-|\bstack\b/u.test(command)) return null;
+  return { by: "branch", kind, branch };
+}
+
+/**
+ * The change requests a shell command merged, or set to merge once checks pass, with a host's
+ * CLI: each merge command's URL or number, else its branch. A number is placed by a URL for it
+ * on a line of the output, else by the command's `--repo`, else in the thread's project.
+ */
+function changeRequestsMergedBy(input: string, output: string): ReadonlyArray<MergedChangeRequest> {
+  if (!isChangeRequestCloseCommand(input)) return [];
+  const script = shellScript(input);
+  // Text is blanked in place, so a match in `code` indexes `commands` too.
+  const commands = script
+    .replace(HEREDOC_BODY, (body) => " ".repeat(body.length))
+    .replace(QUOTED_OR_COMMENT, (text) => (text.startsWith("#") ? " ".repeat(text.length) : text));
+  const code = commands.replace(QUOTED_OR_COMMENT, (text) => "_".repeat(text.length));
+  // A listing prints other change requests' URLs, so the output places nothing.
+  const printed = LISTS_CHANGE_REQUESTS.test(code)
+    ? []
+    : Array.from(output.matchAll(URL_LINE), ([, url = ""]) => ({
+        url,
+        parsed: sourceControlDefinitions.parseChangeRequestUrl(url),
+      }));
+  const merged: Array<MergedChangeRequest> = [];
+  for (const { kind, run } of MERGE_COMMANDS) {
+    for (const match of code.matchAll(run)) {
+      const [whole, command = ""] = match;
+      if (CLOSES_UNMERGED.test(command)) continue;
+      const start = match.index + whole.length - command.length;
+      const words = shellWords(shellSegments(commands.slice(start))[0] ?? "");
+      const target = mergedBy(kind, command, words);
+      if (target === null) continue;
+      if (target.by === "number") {
+        const keys = new Map<string, MergedChangeRequest>();
+        for (const { url, parsed } of printed) {
+          if (parsed === null || parsed.definition.kind !== kind) continue;
+          if (parsed.link.number !== target.number) continue;
+          const key = normalizeThreadPullRequestKey(parsed.link);
+          keys.set(threadPullRequestKeyOf(key), { by: "url", ...key, url });
+        }
+        if (keys.size === 1) {
+          merged.push(...keys.values());
+          continue;
+        }
+      }
+      merged.push(target);
+    }
+  }
+  return merged;
 }
 
 const isPullRequestProviderError = Schema.is(PullRequestProviderError);
@@ -788,6 +951,86 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  /** The link a merge command's target names from the thread's checkout; null if none. */
+  const mergedLink = Effect.fnUntraced(function* (
+    target: MergedChangeRequest,
+    thread: OrchestrationV2ThreadShell,
+  ) {
+    if (target.by === "url") {
+      const { host, repository, number, url } = target;
+      return { host, repository, number, url };
+    }
+    if (target.by === "branch") {
+      // Status sync found the pull request the thread's branch heads.
+      const opened = thread.branchPullRequest;
+      if (opened == null || (target.branch !== null && target.branch !== thread.branch)) {
+        return null;
+      }
+      const parsed = sourceControlDefinitions.parseChangeRequestUrl(opened.url);
+      return parsed?.definition.kind === target.kind && parsed.link.number === opened.number
+        ? { ...normalizeThreadPullRequestKey(parsed.link), url: opened.url }
+        : null;
+    }
+    const project = yield* pullRequests.addressedProject(thread.projectId);
+    const repository =
+      target.repository ?? sourceControlDefinitions.repositorySelector(project?.repositoryIdentity);
+    if (repository === null) return null;
+    const resolved = yield* resolveTarget(
+      { host: target.host ?? undefined, repository, number: target.number },
+      project,
+    ).pipe(Effect.option);
+    if (Option.isNone(resolved)) return null;
+    // Only the host whose CLI ran can have merged it.
+    const host = sourceControlDefinitions.parseChangeRequestUrl(resolved.value.url)?.definition;
+    return host?.kind === target.kind ? resolved.value : null;
+  });
+
+  // An agent that merges a pull request from a shell, or sets one to merge, gets it linked as
+  // link_pull_request would, so what it merged shows beside what it opened.
+  const linkMergedChangeRequests = Effect.fn("PullRequestSyncReactor.linkMergedChangeRequests")(
+    function* (threadId: ThreadId, item: CommandExecution) {
+      // Some providers report a command that failed as completed.
+      if (item.status !== "completed" || commandIndicatesFailure(item)) return;
+      const merged = changeRequestsMergedBy(item.input, item.output ?? "");
+      if (merged.length === 0) return;
+      const thread = yield* engine.getThreadShell(threadId);
+      if (thread === null || thread.deletedAt !== null) return;
+      for (const target of merged) {
+        const link = yield* mergedLink(target, thread);
+        // A stack member the user dismissed comes back, as it does for one the agent opens.
+        if (
+          link === null ||
+          threadPullRequestsOf(thread).some(
+            (existing) =>
+              existing.source !== "stack-dismissed" && threadPullRequestKeysEqual(existing, link),
+          )
+        ) {
+          continue;
+        }
+        yield* engine.dispatch({
+          type: "thread.pull-request.link",
+          // Stable per command, so a repeated settlement cannot relink one the user unlinked.
+          commandId: CommandId.make(
+            `server:pr-merged-link:${threadId}:${item.id}:${threadPullRequestKeyOf(link)}`,
+          ),
+          threadId,
+          ...link,
+          source: "agent",
+        });
+      }
+    },
+    (effect, threadId) =>
+      effect.pipe(
+        // An unresolvable or unavailable target is logged like any other skip.
+        Effect.catch((error) =>
+          Effect.logWarning("linking a pull request a command merged failed", { threadId, error }),
+        ),
+        Effect.catchCause(
+          logSkipped("linking a pull request a command merged failed", { threadId }),
+        ),
+      ),
+  );
+
   // A push can start new checks, so the thread's watches forget whether checks were running and
   // hold the thread until they read the pull request again. The run is still going, so the
   // thread never shows as done in between.
@@ -867,7 +1110,13 @@ export const make = Effect.gen(function* () {
               closeCommands.set(event.threadId, ended);
               if (!active && !ended.has(item.id)) {
                 ended.add(item.id);
-                reaction = Effect.andThen(reaction, refreshUnmergedLinks(event.threadId));
+                reaction = Effect.andThen(
+                  reaction,
+                  Effect.andThen(
+                    linkMergedChangeRequests(event.threadId, item),
+                    refreshUnmergedLinks(event.threadId),
+                  ),
+                );
               }
             }
             // Every reaction skips a running command, so only an ended one forks.

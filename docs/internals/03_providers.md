@@ -18,7 +18,8 @@ clients read declared capabilities, never provider names.
   ACP agent deviates from or lacks part of the spec, let orchestration degrade through capabilities
   rather than special-casing it here. Dedicated ACP flavors (over `packages/provider-acp`) are
   reserved for first-party drivers that need behavior outside the ACP spec; native
-  `ProviderAdapterV2` adapters are only for non-ACP protocols.
+  `ProviderAdapterV2` adapters are only for non-ACP protocols. [omp](../../packages/provider-omp)
+  is the exception: it speaks ACP, but only its RPC mode reports subagents, so it runs on RPC.
 - **Package boundaries.** Providers live in `packages/provider-<name>` (see
   [Pi](../../packages/provider-pi) as reference). Server code imports only
   `@t3tools/provider-core/server/*`, contracts, and shared, reaching host capabilities through
@@ -35,6 +36,9 @@ clients read declared capabilities, never provider names.
   Pass native approval and question option IDs through unchanged, and ensure every request can be
   declined.
 - **Hide plan mode unless it produces proposed-plan cards.**
+- **Declare prompt keywords as data.** A provider that acts on standalone prompt words (omp's
+  magic keywords) lists them in `ServerProvider.promptKeywords` with their gradient; clients paint
+  them with `@t3tools/shared/promptKeywords` and never hard-code a provider's words.
 - **Reject conversation rollback before touching files** when the provider cannot roll back its
   conversation (see [checkpoints](./01_architecture.md#turn-completion-and-checkpoints)).
 

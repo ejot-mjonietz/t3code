@@ -351,8 +351,9 @@ and their marks follow the same rules as on web and desktop.
 A thread can hold several pull requests, including reviews from another repository on the same host.
 Use **Link pull request** in the command palette or **Linked items** panel, or right-click a
 pull request link in the conversation. Creating a pull request from Git actions links it automatically,
-and so does an agent creating one with `gh pr create` or `glab mr create`. Agents can link other
-pull requests with the `link_pull_request` tool.
+and so does an agent creating one with `gh pr create` or `glab mr create`, or merging one with
+`gh pr merge` or T3 Code's merge tool. Agents can link other pull requests with the
+`link_pull_request` tool.
 
 Agents can also read, open, update, reply on, and merge pull requests in the thread's repository
 through T3 Code's own tools, which use the same sign-in as the Pull requests page. An agent merges
@@ -366,6 +367,9 @@ also lists the threads that link to it, including archived threads, so you can r
 Thread badges show a stack's layer count or the current review number with a count of additional
 links. Clicking a badge with more than one review opens the **Linked items** panel. On mobile, the Git overview lists linked reviews and their stacks; tap a review to open it.
 Linking and unlinking are available in the web and desktop clients.
+
+A thread also lists the pull requests its subagents link, labeled with the subagent, and its
+badges count them. Open the subagent to unlink or watch one of those.
 
 The **Linked items** panel lists every review and groups stacks. Unlink a review from its
 row menu. An unlinked stack layer stays out of later syncs. Open linked reviews refresh on the server;

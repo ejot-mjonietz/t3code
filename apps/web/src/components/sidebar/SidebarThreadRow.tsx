@@ -1,5 +1,6 @@
-import { useAtomMount } from "@effect/atom-react";
+import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
+import { rollUpThreadPullRequests } from "@t3tools/client-runtime/state/threads";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
@@ -116,6 +117,7 @@ import {
 } from "../ThreadStatusIndicators";
 import { pickSnoozePreset, resolveSnoozePresets, type SnoozePreset } from "../Sidebar.snooze";
 import { useThreadShell } from "../../state/entities";
+import { environmentThreadShells } from "../../state/threads";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import { ThreadSearchMatchExcerpt } from "../ThreadSearchMatch";
 import { makeWorkspaceFileDropHandlers } from "../chat/workspaceFileDrop";
@@ -255,6 +257,7 @@ function SidebarProviderStack(props: {
 
 function SidebarThreadTooltip({
   thread,
+  pullRequests,
   project,
   projectDisplayName,
   environmentLabel,
@@ -269,6 +272,8 @@ function SidebarThreadTooltip({
   terminalProcessCount,
 }: {
   thread: SidebarThreadSummary;
+  /** The thread's own links, with its subagents' where the row shows them. */
+  pullRequests: SidebarThreadSummary["pullRequests"];
   project: ProjectFaviconProject | null;
   projectDisplayName: string | null;
   environmentLabel: string | null;
@@ -298,9 +303,9 @@ function SidebarThreadTooltip({
       <ThreadHoverCard
         title={thread.title}
         footer={
-          supportsMultiplePullRequests && thread.pullRequests.length > 0 ? (
+          supportsMultiplePullRequests && pullRequests.length > 0 ? (
             <div className="border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
-              <ThreadPullRequestsMiniList pullRequests={thread.pullRequests} />
+              <ThreadPullRequestsMiniList pullRequests={pullRequests} />
             </div>
           ) : null
         }
@@ -739,12 +744,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     discardComposerDraft(threadRef);
   };
 
+  // Subagents have no rows, so their links count on this one; its own link to one of them wins.
+  const descendantLinks = useAtomValue(
+    environmentThreadShells.descendantPullRequestsAtom(threadRef),
+  );
+  const pullRequests = rollUpThreadPullRequests(thread.pullRequests, descendantLinks).pullRequests;
   const gitCwd = thread.worktreePath ?? props.project?.workspaceRoot ?? null;
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
     thread.environmentId,
     thread.linkedPullRequest,
     leaseLiveStatus,
-    thread.pullRequests,
+    pullRequests,
     thread.branchPullRequest,
   );
   const branchTarget =
@@ -768,7 +778,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const pr = linkedPullRequestStatus?.pr ?? null;
   const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
   const currentLinkedPr = supportsMultiplePullRequests
-    ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
+    ? resolveThreadCurrentPullRequestLink(pullRequests)
     : null;
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
@@ -872,6 +882,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const detailsTooltip = (
     <SidebarThreadTooltip
       thread={checkoutThread}
+      pullRequests={pullRequests}
       project={props.project}
       projectDisplayName={props.projectDisplayName}
       environmentLabel={props.environmentLabel}
@@ -1116,7 +1127,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
 
   const prBadgeShape = supportsMultiplePullRequests
-    ? resolveThreadPullRequestBadge(thread.pullRequests)
+    ? resolveThreadPullRequestBadge(pullRequests)
     : null;
   const openLinkedItems = () => {
     useRightPanelStore.getState().open(threadRef, "pull-requests");
@@ -1127,7 +1138,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       <ThreadPullRequestBadgeControl
         render={<InlineButton />}
         badge={prBadgeShape}
-        pullRequests={thread.pullRequests}
+        pullRequests={pullRequests}
         number={pr?.number ?? currentLinkedPr?.number}
         url={pr?.url ?? currentLinkedPr?.url}
         status={prStatus}
@@ -1949,6 +1960,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
         </TooltipTrigger>
         <SidebarThreadTooltip
           thread={checkoutThread}
+          pullRequests={checkoutThread.pullRequests}
           project={props.project}
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}

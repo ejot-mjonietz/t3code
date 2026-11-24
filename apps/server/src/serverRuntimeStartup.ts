@@ -1,6 +1,5 @@
 import {
   CommandId,
-  DEFAULT_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_SERVER_SETTINGS,
   isListedThreadLineage,
@@ -175,9 +174,10 @@ const recordStartupHeartbeat = Effect.gen(function* () {
   yield* analytics.recordOwners(yield* getServerOwners, "server");
 });
 
+// omp is this build's main coding agent, so the welcome thread starts on its default model.
 const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
-  instanceId: ProviderInstanceId.make("codex"),
-  model: DEFAULT_MODEL,
+  instanceId: ProviderInstanceId.make("omp"),
+  model: "default",
 });
 
 interface AutoBootstrapWelcomeTargets {

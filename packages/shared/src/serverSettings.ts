@@ -64,6 +64,7 @@ export function isModelSelectionProviderEnabled(
 const TEXT_GENERATION_FALLBACK_DRIVERS = [
   "codex",
   "claudeAgent",
+  "omp",
   "cursor",
   "grok",
   "muse",

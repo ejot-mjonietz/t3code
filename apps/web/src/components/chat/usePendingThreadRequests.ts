@@ -237,6 +237,14 @@ function readPendingUserInputDraft(scope: PendingUserInputDraftScope) {
   );
 }
 
+// Writes start from the suggested answer and default options the user was looking at.
+function seededPendingDraft(
+  drafts: Record<string, PendingUserInputDraftAnswer> | undefined,
+  question: PendingUserInput["questions"][number],
+): PendingUserInputDraftAnswer | undefined {
+  return seedUserInputDraftAnswers([question], drafts ?? {})[question.id];
+}
+
 function makePendingCustomAnswerSetter(input: {
   readonly activePendingUserInput: PendingUserInput | null;
   readonly activePendingRequestKey: string;
@@ -263,7 +271,7 @@ function makePendingCustomAnswerSetter(input: {
         ...existing[activePendingRequestKey],
         [questionId]: setPendingUserInputCustomAnswer(
           question,
-          existing[activePendingRequestKey]?.[questionId],
+          seededPendingDraft(existing[activePendingRequestKey], question),
           value,
         ),
       },
@@ -420,10 +428,12 @@ export function usePendingThreadRequests(input: {
       });
       for (const { question, target, draft } of questionDrafts) {
         if ((useQuestionAttachmentPreparation.getState().counts[target] ?? 0) > 0) return;
-        providerAnswers[question.id] = projectPendingUserInputAnswer(
-          answers[question.id],
-          answerContextRecords(draft, threadDraft),
-        );
+        const records = answerContextRecords(draft, threadDraft);
+        const answer = answers[question.id];
+        // Multi-select answers carry typed text as an entry beside the option values.
+        providerAnswers[question.id] = Array.isArray(answer)
+          ? answer.map((entry) => projectPendingUserInputAnswer(entry, records))
+          : projectPendingUserInputAnswer(answer, records);
         const attachments = draft ? [...draft.images, ...draft.files] : [];
         if (attachments.length === 0) continue;
         await refreshExpiredAttachmentUploads({
@@ -532,64 +542,66 @@ export function usePendingThreadRequests(input: {
     if (!activePendingUserInput) {
       return;
     }
-    // The option replaces the custom answer. Anything typed there is the
-    // user's text, so it goes back to the thread draft instead of vanishing.
-    const displacedAnswer =
-      readPendingUserInputDraft(draftScope).activePendingDraftAnswers[questionId]?.customAnswer;
-    const currentPrompt =
-      useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.prompt ?? "";
-    const nextPrompt = carryDisplacedCustomAnswerIntoPrompt(currentPrompt, displacedAnswer);
-    if (nextPrompt !== currentPrompt) {
-      setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-      displacedAnswers.current.push({
-        draft: displacedDraftKey,
-        key: `${activePendingRequestKey}:${questionId}`,
-        text: displacedAnswer ?? "",
-      });
-      toastManager.add({
-        type: "info",
-        title: m(msg("Your typed text was set aside")),
-        description: m(msg("It will be back in the composer once the question is answered.")),
-        data: { threadRef: activeThreadId ? { environmentId, threadId: activeThreadId } : null },
-      });
-      if (activeThreadId) {
-        const store = useComposerDraftStore.getState();
-        const questionTarget = questionAttachmentDraftId(
-          environmentId,
-          activeThreadId,
-          activePendingUserInput.requestId,
-          questionId,
-        );
-        store.addThreadContexts(
-          composerDraftTarget,
-          threadContextsReferencedByAnswer(
-            displacedAnswer ?? "",
-            store.getComposerDraft(questionTarget)?.threadContexts ?? [],
-          ),
-          { appendReference: false },
-        );
+    const question = activePendingUserInput.questions.find((entry) => entry.id === questionId);
+    if (!question) {
+      return;
+    }
+    // A multi-select option joins the custom answer, which stays in the composer.
+    if (!question.multiSelect) {
+      // The option replaces the custom answer. Anything typed there is the
+      // user's text, so it goes back to the thread draft instead of vanishing.
+      const displacedAnswer =
+        readPendingUserInputDraft(draftScope).activePendingDraftAnswers[questionId]?.customAnswer;
+      const currentPrompt =
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.prompt ?? "";
+      const nextPrompt = carryDisplacedCustomAnswerIntoPrompt(currentPrompt, displacedAnswer);
+      if (nextPrompt !== currentPrompt) {
+        setComposerDraftPrompt(composerDraftTarget, nextPrompt);
+        displacedAnswers.current.push({
+          draft: displacedDraftKey,
+          key: `${activePendingRequestKey}:${questionId}`,
+          text: displacedAnswer ?? "",
+        });
+        toastManager.add({
+          type: "info",
+          title: m(msg("Your typed text was set aside")),
+          description: m(msg("It will be back in the composer once the question is answered.")),
+          data: { threadRef: activeThreadId ? { environmentId, threadId: activeThreadId } : null },
+        });
+        if (activeThreadId) {
+          const store = useComposerDraftStore.getState();
+          const questionTarget = questionAttachmentDraftId(
+            environmentId,
+            activeThreadId,
+            activePendingUserInput.requestId,
+            questionId,
+          );
+          store.addThreadContexts(
+            composerDraftTarget,
+            threadContextsReferencedByAnswer(
+              displacedAnswer ?? "",
+              store.getComposerDraft(questionTarget)?.threadContexts ?? [],
+            ),
+            { appendReference: false },
+          );
+        }
       }
     }
-    setPendingUserInputAnswersByRequestId((existing) => {
-      const question = activePendingUserInput.questions.find((entry) => entry.id === questionId);
-      if (!question) {
-        return existing;
-      }
-
-      return {
-        ...existing,
-        [activePendingRequestKey]: {
-          ...existing[activePendingRequestKey],
-          [questionId]: togglePendingUserInputOptionSelection(
-            question,
-            existing[activePendingRequestKey]?.[questionId],
-            optionValue,
-          ),
-        },
-      };
-    });
-    promptRef.current = "";
-    composerRef.current?.resetCursorState({ cursor: 0 });
+    setPendingUserInputAnswersByRequestId((existing) => ({
+      ...existing,
+      [activePendingRequestKey]: {
+        ...existing[activePendingRequestKey],
+        [questionId]: togglePendingUserInputOptionSelection(
+          question,
+          seededPendingDraft(existing[activePendingRequestKey], question),
+          optionValue,
+        ),
+      },
+    }));
+    if (!question.multiSelect) {
+      promptRef.current = "";
+      composerRef.current?.resetCursorState({ cursor: 0 });
+    }
   };
   const onSelectActivePendingUserInputOptionStable = useStableCallback(
     onSelectActivePendingUserInputOption,

@@ -7,13 +7,15 @@ import type {
   VcsStatusResult,
 } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import type { ThreadDescendantPullRequest } from "@t3tools/client-runtime/state/threads";
 import {
   pullRequestListLines,
   resolveThreadPullRequestChains,
   threadPullRequestKeyOf,
   visibleThreadPullRequests,
 } from "@t3tools/client-runtime/thread-pull-requests";
-import { useMessages } from "gt-react";
+import { useGT, useMessages } from "gt-react";
+import { BotIcon } from "lucide-react";
 import { useState, type ComponentProps, type MouseEvent as ReactMouseEvent } from "react";
 
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -36,9 +38,21 @@ import {
 
 import { ThreadDetailsPrRow } from "./ThreadDetailsPrRow";
 
+/** Names the subagent a rolled-up link comes from; its own thread unlinks or watches it. */
+function ThreadDetailsPrOrigin({ title }: { title: string }) {
+  const gt = useGT();
+  return (
+    <div className="flex min-w-0 items-center gap-1 ps-9 pe-2.5 pb-1 text-2xs text-muted-foreground">
+      <BotIcon aria-hidden className="size-3 shrink-0" />
+      <span className="truncate">{gt("From subagent {title}", { title })}</span>
+    </div>
+  );
+}
+
 function ThreadDetailsPrLinkRow({
   environmentId,
   link,
+  origin,
   onOpen,
   onActed,
   onStopWatching,
@@ -46,6 +60,8 @@ function ThreadDetailsPrLinkRow({
 }: {
   environmentId: EnvironmentId;
   link: ThreadPullRequestLink;
+  /** The subagent the link comes from; undefined for the thread's own link. */
+  origin: ThreadDescendantPullRequest | undefined;
   onOpen: (event: ReactMouseEvent<HTMLElement>) => void;
   onActed?: (() => void) | undefined;
   onStopWatching?: (() => void) | undefined;
@@ -64,31 +80,37 @@ function ThreadDetailsPrLinkRow({
   const linked = linkedPullRequestSnapshotStatus(link);
   const pr = linked?.pr ?? null;
   return (
-    <ThreadDetailsPrRow
-      environmentId={environmentId}
-      pr={pr}
-      number={link.number}
-      reference={link}
-      status={prStatusIndicator(pr, linked?.sourceControlProvider, m)}
-      project={project}
-      label={`#${link.number}${link.snapshot === null ? "" : `: ${link.snapshot.title}`}`}
-      onOpen={onOpen}
-      onStopWatching={onStopWatching}
-      composerTarget={composerTarget}
-      {...(onActed ? { onActed } : {})}
-    />
+    <>
+      <ThreadDetailsPrRow
+        environmentId={environmentId}
+        pr={pr}
+        number={link.number}
+        reference={link}
+        status={prStatusIndicator(pr, linked?.sourceControlProvider, m)}
+        project={project}
+        label={`#${link.number}${link.snapshot === null ? "" : `: ${link.snapshot.title}`}`}
+        onOpen={onOpen}
+        onStopWatching={onStopWatching}
+        composerTarget={composerTarget}
+        {...(onActed ? { onActed } : {})}
+      />
+      {origin === undefined ? null : <ThreadDetailsPrOrigin title={origin.threadTitle} />}
+    </>
   );
 }
 
 function ThreadDetailsPrRows({
   threadRef,
   links,
+  descendants,
   currentLink,
   onOpenLink,
   ...row
 }: ComponentProps<typeof ThreadDetailsPrRow> & {
   threadRef: ScopedThreadRef;
   links: ReadonlyArray<ThreadPullRequestLink>;
+  /** The subagent links in `links`, which this thread can neither unlink nor watch. */
+  descendants: ReadonlyArray<ThreadDescendantPullRequest>;
   currentLink: ThreadPullRequestLink | null;
   onOpenLink: (event: ReactMouseEvent<HTMLElement>, url: string) => void;
 }) {
@@ -108,7 +130,19 @@ function ThreadDetailsPrRows({
               watching: false,
             },
           });
-  const currentRow = <ThreadDetailsPrRow {...row} onStopWatching={stopWatching(currentLink)} />;
+  const currentOrigin =
+    currentLink === null ? undefined : descendants.find((entry) => entry.link === currentLink);
+  const currentRow = (
+    <>
+      <ThreadDetailsPrRow
+        {...row}
+        onStopWatching={currentOrigin === undefined ? stopWatching(currentLink) : undefined}
+      />
+      {currentOrigin === undefined ? null : (
+        <ThreadDetailsPrOrigin title={currentOrigin.threadTitle} />
+      )}
+    </>
+  );
   const rest =
     currentLink === null
       ? []
@@ -122,17 +156,21 @@ function ThreadDetailsPrRows({
       {currentRow}
       {expanded ? (
         <div data-thread-details-pr-list className="flex flex-col">
-          {rest.map((link) => (
-            <ThreadDetailsPrLinkRow
-              key={threadPullRequestKeyOf(link)}
-              environmentId={row.environmentId}
-              link={link}
-              onOpen={(event) => onOpenLink(event, link.url)}
-              onActed={row.onActed}
-              onStopWatching={stopWatching(link)}
-              composerTarget={row.composerTarget}
-            />
-          ))}
+          {rest.map((link) => {
+            const origin = descendants.find((entry) => entry.link === link);
+            return (
+              <ThreadDetailsPrLinkRow
+                key={threadPullRequestKeyOf(link)}
+                environmentId={row.environmentId}
+                link={link}
+                origin={origin}
+                onOpen={(event) => onOpenLink(event, link.url)}
+                onActed={row.onActed}
+                onStopWatching={origin === undefined ? stopWatching(link) : undefined}
+                composerTarget={row.composerTarget}
+              />
+            );
+          })}
         </div>
       ) : null}
       <ThreadDetailsMoreButton
@@ -162,7 +200,7 @@ export function ThreadDetailsThreadPrRows({
 }) {
   const thread = useQuietThreadShell(threadRef);
   const displayed = useThreadDisplayedPullRequest(
-    threadRef.environmentId,
+    threadRef,
     thread,
     branchPr,
     branchSourceControlProvider,
@@ -186,7 +224,8 @@ export function ThreadDetailsThreadPrRows({
   return (
     <ThreadDetailsPrRows
       threadRef={threadRef}
-      links={thread?.pullRequests ?? []}
+      links={displayed.pullRequests}
+      descendants={displayed.descendants}
       currentLink={currentLink}
       onOpenLink={openPrLink}
       environmentId={threadRef.environmentId}

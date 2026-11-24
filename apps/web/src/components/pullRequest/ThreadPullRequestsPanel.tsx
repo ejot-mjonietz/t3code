@@ -1,8 +1,20 @@
-import type { ProjectId, ScopedThreadRef, ThreadPullRequestLink } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import type {
+  ProjectId,
+  ScopedThreadRef,
+  ThreadId,
+  ThreadPullRequestLink,
+} from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { SideThreadOpenIntent } from "@t3tools/client-runtime/side-thread";
 import {
   sourceControlClients,
   UNKNOWN_SOURCE_CONTROL_CLIENT,
 } from "@t3tools/client-runtime/source-control-clients";
+import {
+  rollUpThreadPullRequests,
+  type ThreadDescendantPullRequest,
+} from "@t3tools/client-runtime/state/threads";
 import {
   type PullRequestListLine,
   pullRequestListLines,
@@ -10,8 +22,10 @@ import {
   visibleThreadPullRequests,
 } from "@t3tools/client-runtime/thread-pull-requests";
 import { canStartThreadPullRequestWatch } from "@t3tools/client-runtime/thread-pull-request-compatibility";
+import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
+  BotIcon,
   EyeIcon,
   EyeOffIcon,
   LinkIcon,
@@ -30,6 +44,8 @@ import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { findProjectForChangeRequest } from "@t3tools/client-runtime/change-request-links";
 import { pullRequestLinkPanelTarget, useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
+import { useSideThreadTrigger } from "~/hooks/useSideThreadTrigger";
+import { openSideThread } from "~/lib/sideChatPane";
 import { usePrimaryEnvironmentId } from "~/state/environments";
 import { usePullRequestIntentPrefetch } from "./usePullRequestIntentPrefetch";
 import { cn } from "~/lib/utils";
@@ -37,8 +53,9 @@ import { useShortcutModifierState } from "~/shortcutModifierState";
 import { useProjects, useServerConfigs, useThreadShell } from "~/state/entities";
 import { PullRequestChangeBreakdownStat } from "./PullRequestChangeBreakdownStat";
 import { PullRequestsUnavailableState } from "./PullRequestsUnavailableState";
-import { threadEnvironment } from "~/state/threads";
+import { environmentThreadShells, threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { buildThreadRouteParams } from "~/threadRoutes";
 import { RelativeTime } from "~/components/RelativeTime";
 import { ThreadDetailsIssueRows } from "../chat/ThreadDetailsIssueRows";
 import { Button } from "../ui/button";
@@ -96,26 +113,32 @@ function ChecksGlyph({
 
 function LinkRowImpl({
   line,
+  origin,
   threadRef,
   projectId,
   speedMode,
   onUnlink,
   onSetWatching,
   onIntent,
+  onOpenOrigin,
   canStartWatch,
 }: {
   line: PullRequestListLine;
+  /** The subagent whose link this is; null for the thread's own link. */
+  origin: ThreadDescendantPullRequest | null;
   threadRef: ScopedThreadRef;
   projectId: ProjectId | null;
   speedMode: boolean;
-  onUnlink: (link: ThreadPullRequestLink) => void;
+  onUnlink: ((link: ThreadPullRequestLink) => void) | null;
   onSetWatching: ((link: ThreadPullRequestLink, watching: boolean) => void) | null;
   onIntent: (link: ThreadPullRequestLink | null) => void;
+  onOpenOrigin: (threadId: ThreadId, intent: SideThreadOpenIntent) => void;
   canStartWatch: boolean;
 }) {
   const gt = useGT();
   const resolve = useMessages();
   const openPrLink = useOpenPrLink(threadRef);
+  const sideThreadTrigger = useSideThreadTrigger();
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const menuAnchor = menuPosition
@@ -145,7 +168,12 @@ function LinkRowImpl({
     actionEntry !== null && pullRequestQuickActions(actionEntry, linkHostActions).length > 0;
   return (
     <div
-      className={cn(PULL_REQUEST_ROW_CLASS, "relative hover:bg-accent/60")}
+      className={cn(
+        PULL_REQUEST_ROW_CLASS,
+        "relative hover:bg-accent/60",
+        // A subagent's link names the subagent on a line of its own.
+        origin !== null && "flex-wrap gap-y-0",
+      )}
       onPointerEnter={() => onIntent(link)}
       onPointerLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) onIntent(null);
@@ -206,7 +234,10 @@ function LinkRowImpl({
                 #{link.number}
               </TooltipTrigger>
               <TooltipPopup>
-                {resolve(SOURCE_LABELS[link.source])} · <RelativeTime timestamp={link.linkedAt} />
+                {origin === null
+                  ? resolve(SOURCE_LABELS[link.source])
+                  : gt("From subagent {title}", { title: origin.threadTitle })}{" "}
+                · <RelativeTime timestamp={link.linkedAt} />
               </TooltipPopup>
             </Tooltip>
           }
@@ -311,6 +342,20 @@ function LinkRowImpl({
           updatedAt={snapshot?.updatedAt}
         />
       </a>
+      {origin !== null ? (
+        // Indented past the state glyph, under the title.
+        <span className="order-last flex min-w-0 basis-full pl-6">
+          <button
+            type="button"
+            aria-label={gt("Open subagent {title}", { title: origin.threadTitle })}
+            className="flex min-w-0 items-center gap-1 rounded-sm text-2xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+            {...sideThreadTrigger((intent) => onOpenOrigin(origin.threadId, intent))}
+          >
+            <BotIcon aria-hidden className="size-3 shrink-0" />
+            <span className="truncate">{origin.threadTitle}</span>
+          </button>
+        </span>
+      ) : null}
       {actionEntry !== null ? (
         <PullRequestSpeedActions
           entry={actionEntry}
@@ -378,10 +423,12 @@ function LinkRowImpl({
                 {watching ? gt("Stop watching") : gt("Watch for changes")}
               </MenuItem>
             ) : null}
-            <MenuItem onClick={() => onUnlink(link)}>
-              <PullRequestGlyph.unlink className="size-3.5" />
-              {link.source === "stack" ? gt("Dismiss from thread") : gt("Unlink from thread")}
-            </MenuItem>
+            {onUnlink !== null ? (
+              <MenuItem onClick={() => onUnlink(link)}>
+                <PullRequestGlyph.unlink className="size-3.5" />
+                {link.source === "stack" ? gt("Dismiss from thread") : gt("Unlink from thread")}
+              </MenuItem>
+            ) : null}
           </MenuPopup>
         </Menu>
       </span>
@@ -420,6 +467,9 @@ export function ThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
 function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThreadRef }) {
   const gt = useGT();
   const thread = useThreadShell(threadRef);
+  const descendantLinks = useAtomValue(
+    environmentThreadShells.descendantPullRequestsAtom(threadRef),
+  );
   const issues = thread?.issues ?? [];
   const projects = useProjects();
   const environmentProjects = projects
@@ -428,13 +478,17 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
       left.id === thread?.projectId ? -1 : right.id === thread?.projectId ? 1 : 0,
     );
   // Derive lines before later hooks to preserve compiler caching and avoid LegendList renders.
-  const links = visibleThreadPullRequests(thread?.pullRequests ?? []);
+  // Subagents' links show here read-only: unlinking or watching one happens in its own thread.
+  const rollup = rollUpThreadPullRequests(thread?.pullRequests ?? [], descendantLinks);
+  const links = visibleThreadPullRequests(rollup.pullRequests);
+  const origins = new Map(rollup.descendants.map((entry) => [entry.link, entry] as const));
   const lines = pullRequestListLines(resolveThreadPullRequestChains(links));
   const openCount = links.filter(
     (link) => link.snapshot === null || link.snapshot.state === "open",
   ).length;
   const lastSynced = latestSyncedAt(links);
   const linkCount = links.length;
+  const descendantCount = rollup.descendants.length;
   const modifiers = useShortcutModifierState(true);
   const speedMode =
     modifiers.shiftKey && !modifiers.metaKey && !modifiers.ctrlKey && !modifiers.altKey;
@@ -498,6 +552,17 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
       },
     });
   };
+  const navigate = useNavigate();
+  // A subagent opens beside this thread or in its place, as the click asks.
+  const openOrigin = (threadId: ThreadId, intent: SideThreadOpenIntent) => {
+    openSideThread({
+      threadRef: scopeThreadRef(threadRef.environmentId, threadId),
+      panelRef: threadRef,
+      intent,
+      navigate: (ref) =>
+        void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(ref) }),
+    });
+  };
 
   // Legend rows update only for data/extraData changes; include all external inputs.
   const rowInputs = {
@@ -508,6 +573,7 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
     thread,
     opensInApp,
     primaryEnvironmentId,
+    origins,
   };
 
   if (linkCount === 0 && issues.length === 0) {
@@ -562,24 +628,29 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
               </>
             ) : null
           }
-          renderItem={({ item: line }) => (
-            <LinkRow
-              line={line}
-              threadRef={threadRef}
-              projectId={
-                capabilities !== undefined
-                  ? (findProjectForChangeRequest(environmentProjects, line.link)?.id ??
-                    thread?.projectId ??
-                    null)
-                  : null
-              }
-              speedMode={speedMode}
-              onUnlink={handleUnlink}
-              onSetWatching={supportsWatch ? handleSetWatching : null}
-              onIntent={intendLink}
-              canStartWatch={canStartWatch}
-            />
-          )}
+          renderItem={({ item: line }) => {
+            const origin = origins.get(line.link) ?? null;
+            return (
+              <LinkRow
+                line={line}
+                origin={origin}
+                threadRef={threadRef}
+                projectId={
+                  capabilities !== undefined
+                    ? (findProjectForChangeRequest(environmentProjects, line.link)?.id ??
+                      thread?.projectId ??
+                      null)
+                    : null
+                }
+                speedMode={speedMode}
+                onUnlink={origin === null ? handleUnlink : null}
+                onSetWatching={origin === null && supportsWatch ? handleSetWatching : null}
+                onIntent={intendLink}
+                onOpenOrigin={openOrigin}
+                canStartWatch={canStartWatch}
+              />
+            );
+          }}
           estimatedItemSize={44}
           drawDistance={440}
           className="min-h-0 flex-1 overscroll-contain p-1.5"
@@ -592,6 +663,15 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
                   { openCount, linkCount },
                 )
               : null}
+            {descendantCount > 0 ? (
+              <>
+                {" · "}
+                {gt(
+                  "{count, plural, one {{count} from a subagent} other {{count} from subagents}}",
+                  { count: descendantCount },
+                )}
+              </>
+            ) : null}
             {lastSynced ? (
               <>
                 {" · "}

@@ -27,7 +27,9 @@ const mergeProviderModels = (
   ];
 };
 
+// omp leads so new threads start on it when it is available.
 const BUILT_IN_DRIVER_ORDER: ReadonlyArray<string> = [
+  "omp",
   "codex",
   "claudeAgent",
   "cursor",
@@ -76,7 +78,12 @@ export const hydrateCachedProvider = (input: {
     return input.fallbackProvider;
   }
 
-  const { message: _fallbackMessage, ...fallbackWithoutMessage } = input.fallbackProvider;
+  // The fallback is the unprobed snapshot, so probe-derived fields come from the cache.
+  const {
+    message: _fallbackMessage,
+    promptKeywords: _fallbackPromptKeywords,
+    ...fallbackWithoutMessage
+  } = input.fallbackProvider;
   const hydratedProvider: ServerProvider = {
     ...fallbackWithoutMessage,
     models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
@@ -87,6 +94,9 @@ export const hydrateCachedProvider = (input: {
     checkedAt: input.cachedProvider.checkedAt,
     slashCommands: input.cachedProvider.slashCommands,
     skills: input.cachedProvider.skills,
+    ...(input.cachedProvider.promptKeywords === undefined
+      ? {}
+      : { promptKeywords: input.cachedProvider.promptKeywords }),
   };
 
   return input.cachedProvider.message

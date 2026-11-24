@@ -71,6 +71,7 @@
   "cd03eb1b84271c02": "Agente",
   "bfe1a60f3f9c60fb": "Turno {turn} · {what}",
   "dfdaa6255a416140": "Resumo de {turns, plural, one {{turns} turno recente} other {{turns} turnos recentes}}, {textTurns, plural, =0 {sem texto das mensagens} one {com o texto das mensagens do último turno} other {com o texto das mensagens dos últimos {textTurns} turnos}}{truncated, select, yes {, encurtado para caber} other {}}",
+  "260c6b45f52d2f27": "Adiciona o texto das suas mensagens e das respostas do agente {textTurns, plural, one {no último turno} other {nos últimos {textTurns} turnos}}.",
   "afac52a5cc2dc801": "Não foi possível enviar sua resposta. Tente novamente.",
   "79d776428f4d0650": "Não foi possível carregar o arquivo. Reconecte e tente novamente.",
   "3ea34cbb1ca5ba9b": "Pré-visualização cancelada.",
@@ -2650,6 +2651,7 @@
   "55f4078f7fe8e597": "{term, select, mr {MR} cr {Solicitação de alteração} other {PR}} #{number}, status pendente",
   "3260b22f72f7effb": "{tooltipLead}: {title}",
   "feac8e54b30c5a03": "Processo do terminal em execução",
+  "120862ef9192b6e3": "From subagent {title}",
   "fc2c9a91f498ad6b": "{count, plural, one {{count} processo do terminal em execução. Abrir terminal} other {{count} processos do terminal em execução. Abrir terminal}}",
   "56f37ff8ca568059": "pilha",
   "6831e9a46cbd8939": "cadeia",
@@ -2733,9 +2735,9 @@
   "db7b3a938c45e56c": "Atualização {version} pronta para baixar",
   "9a951140b69ba740": "Baixando atualização ({percent}%)",
   "7fdece033260e9fb": "Baixando atualização",
+  "52e1d4a487c0cf4b": "Falha ao instalar {version}. Clique para tentar novamente.",
   "09ef51903e99e876": "Atualização baixada. Clique para reiniciar e instalar.",
   "d62631cab06d2b80": "Atualização {version} baixada. Clique para reiniciar e instalar.",
-  "52e1d4a487c0cf4b": "Falha ao instalar {version}. Clique para tentar novamente.",
   "78a04e0e625c0990": "Falha na atualização",
   "c24de5eb69373a55": "Esta build {build} ignora as versões {track}. Revise o canal de atualização em Configurações para concluir a troca.",
   "b02ae45a6109c93b": "Atualizado",
@@ -3365,6 +3367,7 @@
   "880aa376639f0b04": "Envie uma mensagem para recusar e redirecionar o agente",
   "d9c81b6a6bad8058": "Escolha uma opção acima",
   "9a3db19d3e12dea6": "Digite sua resposta",
+  "f3a50d9754041f5a": "Add your own answer to the selected options, or leave this blank",
   "ea8fec0f7052e43e": "Digite sua própria resposta ou deixe em branco para usar a opção selecionada",
   "56d9080d3ab28e39": "Escolha um projeto acima para iniciar uma thread",
   "6d66186eedd8009b": "Ative um provedor nas Configurações para enviar uma mensagem",
@@ -3638,7 +3641,6 @@
   "4e0710d19dfc2e7e": "Enviar este relatório para a equipe do T3?",
   "87d0ae0723ba75d1": "Isto é tudo o que sai da sua máquina. Nada é enviado até você clicar em Enviar.",
   "bf19826f81484328": "Incluir a conversa",
-  "260c6b45f52d2f27": "Adiciona o texto das suas mensagens e das respostas do agente {textTurns, plural, one {no último turno} other {nos últimos {textTurns} turnos}}.",
   "ddb7e6f8ce99e657": "Somente quem pode executar agentes nesta máquina pode enviar ou recusar o relatório.",
   "03c1eb603c112f47": "Não enviar",
   "653405e4ed498d9f": "Enviar",
@@ -7228,6 +7230,7 @@
   "1e64c95da299ca6c": "Acompanhando",
   "b07208f457872b13": "Pilha de {size} no {host}: mesclar uma camada também integra as que estão abaixo dela.",
   "5f88c49c7f942c61": "{size} {terms, select, mr {merge requests encadeados} cr {solicitações de alteração encadeadas} other {pull requests encadeados}} pelo branch base.",
+  "d81b54a0b2059ecd": "Open subagent {title}",
   "00b98c592346a2b2": "Ações do #{number}",
   "ed09d936d8ba9792": "Parar de acompanhar",
   "af6adbd67cef13b1": "Acompanhar alterações",
@@ -7236,6 +7239,7 @@
   "ff700a2d719110d8": "O ambiente da thread não está disponível.",
   "b935e8d2dad4d8ba": "Issues vinculadas",
   "e18c90152452a50e": "{openCount, plural, one {{openCount} aberto} other {{openCount} abertos}} · {linkCount, plural, one {{linkCount} vinculado} other {{linkCount} vinculados}}",
+  "20765ea8de9aa131": "{count, plural, one {{count} from a subagent} other {{count} from subagents}}",
   "106c1bf3308a8c33": "Acompanhando: o agente é ativado quando as verificações terminam, alguém comenta ou o branch entra em conflito",
   "15a560968264b0ed": "Abrir",
   "a4e0e1e0bad3dcd8": "Nenhum pull request vinculado",
@@ -8754,9 +8758,13 @@
   "ed83b25c71c98a20": "Escolha um ou mais {scope}s do {tracker} para cada projeto. As issues deles aparecem ao lado das do repositório, e os agentes criam novas issues no primeiro, a menos que outro seja pedido.",
   "19c2d5e81ff8f89a": "{scope} do {tracker} para {project}",
   "68e061510b765772": "Não vinculado",
+  "99d51127f573296b": "Outra conta",
+  "8ec2c57414669b79": "Conecte um segundo espaço de trabalho ou usuário do {tracker}.",
+  "99963c0142e17f00": "Para a nova conta do {tracker}.",
   "a2d95d39d3398bda": "Credencial recusada",
   "9eae463720500113": "Armazenado no servidor.",
   "b6e27ab2537ef874": "Criar um",
+  "6d8e4ebc889bace9": "Adicionar conta",
   "13ef526271b0f5d4": "Limpar todas as condições",
   "d1938a629f039515": "Remover condição",
   "84a605b241ce65b7": "Remover grupo e as condições dele",
@@ -12603,6 +12611,16 @@
   "156ff7b625287a1e": "Ocultar puladas",
   "69b985b97ab45e6b": "Mostrar puladas ({count})",
   "2400254d362de84d": "Carregando execuções de workflow…",
+  "cae5c3205c01d062": [
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Um arquivo de workflow tem um problema."
+    },
+    " ",
+    "A última versão que carregou continua em execução."
+  ],
+  "ed8ce6ebc73dc12d": "Abrir o arquivo",
   "145e1f7503ba3b2c": [
     "Este ambiente não tem nenhuma execução com esse link.",
     " ",
@@ -12628,16 +12646,6 @@
       "c": "Leia o guia"
     }
   ],
-  "cae5c3205c01d062": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Um arquivo de workflow tem um problema."
-    },
-    " ",
-    "A última versão que carregou continua em execução."
-  ],
-  "ed8ce6ebc73dc12d": "Abrir o arquivo",
   "5d8d278ff828102d": "Todos os workflows",
   "39459da07479f482": "Agente",
   "7741243632056b81": "{step} · transcrição",
@@ -12782,9 +12790,5 @@
   "27d76249d09eb69f": "Guia de revisão pronto",
   "faa3bb26abb39c93": "O guia de revisão falhou",
   "b7df38b7d8792d78": "Abrir guia",
-  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão",
-  "99d51127f573296b": "Outra conta",
-  "8ec2c57414669b79": "Conecte um segundo espaço de trabalho ou usuário do {tracker}.",
-  "99963c0142e17f00": "Para a nova conta do {tracker}.",
-  "6d8e4ebc889bace9": "Adicionar conta"
+  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão"
 }

@@ -519,6 +519,11 @@ export interface ActiveShellIndexEntry extends Pick<
   readonly mayBeLive: boolean;
   /** Whether it delegated a task to a linked environment, whose clients nest that task under it. */
   readonly hasRemoteTasks: boolean;
+  /**
+   * Whether it has a pull request link, dismissed ones too, so shells keep an idle subagent whose
+   * ancestors list its links. Absent reads as none.
+   */
+  readonly hasPullRequests?: boolean;
 }
 
 /** What thread listings filter and order an active thread by, without building its shell. */
@@ -9549,6 +9554,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly snoozed_until: string | null;
         readonly may_be_live: number;
         readonly has_remote_tasks: number;
+        readonly has_pull_requests: number;
       }>`
         SELECT
           t.thread_id,
@@ -9562,6 +9568,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ${indexedField("$.pinnedAt")} AS pinned_at,
           ${indexedField("$.pinOrderKey")} AS pin_order_key,
           ${indexedField("$.snoozedUntil")} AS snoozed_until,
+          ${indexedField("$.pullRequests[0]", "json_type")} IS NOT NULL AS has_pull_requests,
           -- A superset of isLiveSubagentShell: the sources of its run status, pending request,
           -- and pending background work. Each source is one list for the whole read, found
           -- through its partial index, so finished threads cost no lookups.
@@ -9628,6 +9635,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
         mayBeLive: row.may_be_live === 1,
         hasRemoteTasks: row.has_remote_tasks === 1,
+        hasPullRequests: row.has_pull_requests === 1,
       }));
     }, Effect.mapError(shellSnapshotReadError));
 
